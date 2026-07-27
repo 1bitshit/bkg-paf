@@ -17,6 +17,7 @@ import { Plugins } from './pages/Plugins'
 import { Agents } from './pages/Agents'
 import { Providers } from './pages/Providers'
 import { NimSettings } from './pages/NimSettings'
+import { Docker } from './pages/Docker'
 import { SettingsDialog } from './components/settings/SettingsDialog'
 import { VersionNotifier } from './components/VersionNotifier'
 import { PwaUpdatePrompt } from '@/components/PwaUpdatePrompt'
@@ -266,6 +267,11 @@ const router = createBrowserRouter([
       {
         path: '/nim',
         element: <NimSettings />,
+        loader: protectedLoader,
+      },
+      {
+        path: '/docker',
+        element: <Docker />,
         loader: protectedLoader,
       },
     ],
