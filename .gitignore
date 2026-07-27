@@ -19,7 +19,7 @@ workspace/
 /config/
 temp/
 .forge/
+
+.kilocodemodes
 .autoclaw/*
 .clinerules/*
-agent-cli/*
-bin/

@@ -950,8 +950,7 @@ export function Docker() {
 
   return (
     <div className="h-full flex flex-col">
-      <Header>
-        <Header.Title>Docker</Header.Title>
+      <Header title="Docker">
         <Button variant="outline" size="sm" onClick={refresh}>
           <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
           Refresh
