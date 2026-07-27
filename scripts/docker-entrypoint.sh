@@ -87,6 +87,16 @@ if [ -z "$AUTH_SECRET" ]; then
 fi
 
 mkdir -p /app/data /workspace /home/node/.cache /home/node/.opencode
+
+# Add node user to docker group so it can access the Docker socket
+if [ -S /var/run/docker.sock ]; then
+  DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null)
+  if [ -n "$DOCKER_GID" ]; then
+    getent group docker >/dev/null 2>&1 || groupadd -g "$DOCKER_GID" docker 2>/dev/null || true
+    usermod -aG docker node 2>/dev/null || true
+  fi
+fi
+
 chown -R node:node /app/data /workspace /home/node
 
 exec runuser -u node -- "$@"
