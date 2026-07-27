@@ -1,0 +1,34 @@
+{
+  "name": "@opencode-manager/shared",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schemas": "./src/schemas/index.ts",
+    "./types": "./src/types/index.ts",
+    "./types/errors": "./src/types/errors.ts",
+    "./config": "./src/config/index.ts",
+    "./config/defaults": "./src/config/defaults.ts",
+    "./config/env": "./src/config/env.ts",
+    "./config/client": "./src/config/client.ts",
+    "./utils": "./src/utils/index.ts",
+    "./notifications": "./src/notifications/index.ts",
+    "./project-id": "./src/project-id-resolver.ts"
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.3.1",
+    "zod": "^4.1.12"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "optionalDependencies": {
+    "dotenv": "^17.2.3"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  }
+}
