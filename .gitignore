@@ -20,3 +20,6 @@ workspace/
 temp/
 .forge/
 
+.kilocodemodes
+.autoclaw/*
+.clinerules/*
