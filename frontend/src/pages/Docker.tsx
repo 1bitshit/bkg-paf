@@ -114,7 +114,7 @@ function LogsModal({ containerId, containerName, onClose }: { containerId: strin
 
   const fetchLogs = useCallback(async () => {
     try {
-      const res = await fetch(`/api/docker/containers/${containerId}/logs?lines=200`, { credentials: 'include' })
+      const res = await fetch(`/api/docker/containers/${containerId}/logs?lines=200`)
       const data = await res.json()
       setLogs(data.logs || data.error || 'No logs')
     } catch {
@@ -244,9 +244,9 @@ function StackCard({ stack, onSelect }: { stack: StackInfo; onSelect: (name: str
   )
 }
 
-function CreateStackDialog({ onClose, onCreated, initialComposeYAML }: { onClose: () => void; onCreated: (name: string) => void; initialComposeYAML?: string }) {
+function CreateStackDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (name: string) => void }) {
   const [name, setName] = useState('')
-  const [composeYAML, setComposeYAML] = useState(initialComposeYAML || 'services:\n  app:\n    image: nginx:alpine\n    ports:\n      - "8080:80"')
+  const [composeYAML, setComposeYAML] = useState('services:\n  app:\n    image: nginx:alpine\n    ports:\n      - "8080:80"')
   const [envContent, setEnvContent] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -257,7 +257,7 @@ function CreateStackDialog({ onClose, onCreated, initialComposeYAML }: { onClose
     setError(null)
 
     try {
-      const res = await fetch('/api/stacks', { credentials: 'include',
+      const res = await fetch('/api/stacks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: name.trim(), composeYAML, envContent }),
@@ -336,7 +336,7 @@ function CreateStackDialog({ onClose, onCreated, initialComposeYAML }: { onClose
   )
 }
 
-function StackDetail({ stackName, onBack, onStackCreated }: { stackName: string; onBack: () => void; onStackCreated?: (name: string) => void }) {
+function StackDetail({ stackName, onBack }: { stackName: string; onBack: () => void }) {
   const [stack, setStack] = useState<StackInfo | null>(null)
   const [composeYAML, setComposeYAML] = useState('')
   const [envContent, setEnvContent] = useState('')
@@ -348,7 +348,6 @@ function StackDetail({ stackName, onBack, onStackCreated }: { stackName: string;
   const [showLogs, setShowLogs] = useState(false)
   const [logs, setLogs] = useState('')
   const [logsLoading, setLogsLoading] = useState(false)
-  const [showCreateStack, setShowCreateStack] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [validation, setValidation] = useState<{ valid: boolean; parsed?: string; error?: string } | null>(null)
   const outputRef = useRef<HTMLPreElement>(null)
@@ -356,7 +355,7 @@ function StackDetail({ stackName, onBack, onStackCreated }: { stackName: string;
 
   const fetchStack = useCallback(async () => {
     try {
-      const res = await fetch(`/api/stacks/${stackName}`, { credentials: 'include' })
+      const res = await fetch(`/api/stacks/${stackName}`)
       if (!res.ok) {
         onBack()
         return
@@ -392,7 +391,7 @@ function StackDetail({ stackName, onBack, onStackCreated }: { stackName: string;
   const handleSave = async () => {
     setSaving(true)
     try {
-      const res = await fetch(`/api/stacks/${stackName}`, { credentials: 'include',
+      const res = await fetch(`/api/stacks/${stackName}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ composeYAML, envContent }),
@@ -411,7 +410,7 @@ function StackDetail({ stackName, onBack, onStackCreated }: { stackName: string;
   const handleValidate = async () => {
     setValidation(null)
     try {
-      const res = await fetch(`/api/stacks/${stackName}/validate`, { credentials: 'include',
+      const res = await fetch(`/api/stacks/${stackName}/validate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ composeYAML }),
@@ -430,7 +429,7 @@ function StackDetail({ stackName, onBack, onStackCreated }: { stackName: string;
 
     try {
       const endpoint = operation === 'logs' ? 'logs' : operation
-      const res = await fetch(`/api/stacks/${stackName}/${endpoint}`, { credentials: 'include',
+      const res = await fetch(`/api/stacks/${stackName}/${endpoint}`, {
         method,
       })
       const data: OperationResult = await res.json()
@@ -462,7 +461,7 @@ function StackDetail({ stackName, onBack, onStackCreated }: { stackName: string;
     setShowOutput(true)
 
     try {
-      const res = await fetch(`/api/stacks/${stackName}`, { credentials: 'include', method: 'DELETE' })
+      const res = await fetch(`/api/stacks/${stackName}`, { method: 'DELETE' })
       const data = await res.json()
 
       setOutput((prev) => {
@@ -489,7 +488,7 @@ function StackDetail({ stackName, onBack, onStackCreated }: { stackName: string;
   const fetchLogs = useCallback(async () => {
     setLogsLoading(true)
     try {
-      const res = await fetch(`/api/stacks/${stackName}/logs?lines=150`, { credentials: 'include' })
+      const res = await fetch(`/api/stacks/${stackName}/logs?lines=150`)
       const data = await res.json()
       setLogs(data.logs || 'No logs')
     } catch {
@@ -680,7 +679,7 @@ function StackDetail({ stackName, onBack, onStackCreated }: { stackName: string;
                           size="sm"
                           className="h-6 w-6 p-0 text-emerald-500"
                           onClick={async () => {
-                            await fetch(`/api/stacks/${stackName}/services/${svc.name}/start`, { credentials: 'include', method: 'POST' })
+                            await fetch(`/api/stacks/${stackName}/services/${svc.name}/start`, { method: 'POST' })
                             await fetchStack()
                           }}
                         >
@@ -692,7 +691,7 @@ function StackDetail({ stackName, onBack, onStackCreated }: { stackName: string;
                           size="sm"
                           className="h-6 w-6 p-0 text-yellow-500"
                           onClick={async () => {
-                            await fetch(`/api/stacks/${stackName}/services/${svc.name}/stop`, { credentials: 'include', method: 'POST' })
+                            await fetch(`/api/stacks/${stackName}/services/${svc.name}/stop`, { method: 'POST' })
                             await fetchStack()
                           }}
                         >
@@ -704,7 +703,7 @@ function StackDetail({ stackName, onBack, onStackCreated }: { stackName: string;
                         size="sm"
                         className="h-6 w-6 p-0"
                         onClick={async () => {
-                          await fetch(`/api/stacks/${stackName}/services/${svc.name}/restart`, { credentials: 'include', method: 'POST' })
+                          await fetch(`/api/stacks/${stackName}/services/${svc.name}/restart`, { method: 'POST' })
                           await fetchStack()
                         }}
                       >
@@ -723,9 +722,7 @@ function StackDetail({ stackName, onBack, onStackCreated }: { stackName: string;
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-medium flex items-center gap-2">
                 <FileCode className="w-4 h-4" />
-                <button className="cursor-pointer hover:underline text-left" onClick={() => setShowCreateStack(true)}>
-                  {stack.composeFile}
-                </button>
+                {stack.composeFile}
                 {dirty && <Badge variant="outline" className="text-xs">Modified</Badge>}
               </h3>
               <div className="flex items-center gap-2">
@@ -861,19 +858,6 @@ function StackDetail({ stackName, onBack, onStackCreated }: { stackName: string;
           </Card>
         </div>
       )}
-
-      {showCreateStack && (
-        <CreateStackDialog
-          onClose={() => setShowCreateStack(false)}
-          onCreated={(name) => {
-            setShowCreateStack(false)
-            if (onStackCreated) {
-              onStackCreated(name)
-            }
-          }}
-          initialComposeYAML={composeYAML}
-        />
-      )}
     </div>
   )
 }
@@ -891,7 +875,7 @@ export function Docker() {
 
   const fetchContainers = useCallback(async () => {
     try {
-      const res = await fetch('/api/docker/containers', { credentials: 'include' })
+      const res = await fetch('/api/docker/containers')
       const data = await res.json()
       setContainers(data.containers || [])
       setError(null)
@@ -902,7 +886,7 @@ export function Docker() {
 
   const fetchImages = useCallback(async () => {
     try {
-      const res = await fetch('/api/docker/images', { credentials: 'include' })
+      const res = await fetch('/api/docker/images')
       const data = await res.json()
       setImages(data.images || [])
     } catch {
@@ -912,7 +896,7 @@ export function Docker() {
 
   const fetchInfo = useCallback(async () => {
     try {
-      const res = await fetch('/api/docker/info', { credentials: 'include' })
+      const res = await fetch('/api/docker/info')
       const data = await res.json()
       setDockerInfo(data)
     } catch {
@@ -922,7 +906,7 @@ export function Docker() {
 
   const fetchStacks = useCallback(async () => {
     try {
-      const res = await fetch('/api/stacks', { credentials: 'include' })
+      const res = await fetch('/api/stacks')
       const data = await res.json()
       setStacks(data.stacks || [])
     } catch {
@@ -948,7 +932,7 @@ export function Docker() {
     }
     try {
       const method = action === 'delete' ? 'DELETE' : 'POST'
-      await fetch(`/api/docker/containers/${id}/${action}`, { credentials: 'include', method })
+      await fetch(`/api/docker/containers/${id}/${action}`, { method })
       setTimeout(fetchContainers, 1000)
     } catch {
       // ignore
@@ -962,10 +946,6 @@ export function Docker() {
         onBack={() => {
           setSelectedStack(null)
           fetchStacks()
-        }}
-        onStackCreated={(name) => {
-          fetchStacks()
-          setSelectedStack(name)
         }}
       />
     )

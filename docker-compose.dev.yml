@@ -1,7 +1,7 @@
 services:
   paf:
     build:
-      context: .
+      context: ./opencode-manager
       dockerfile: Dockerfile.dev
       args:
         TOOLS_CACHEBUST: 1
