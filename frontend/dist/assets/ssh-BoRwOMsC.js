@@ -1,0 +1,1 @@
+import{f as s,A as t}from"./main-DkTE55VG.js";async function n(e,o){return s(`${t}/api/ssh/host-key/respond`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requestId:e,response:o?"accept":"reject"})})}export{n as respondSSHHostKey};
