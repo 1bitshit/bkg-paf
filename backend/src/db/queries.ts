@@ -1,0 +1,352 @@
+import type { Database } from 'bun:sqlite'
+import type { Repo, CreateRepoInput } from '../types/repo'
+import { getReposPath } from '@opencode-manager/shared/config/env'
+import { ASSISTANT_REPO_ID, ASSISTANT_REPO_PATH, getRepoDisplayName } from '@opencode-manager/shared/utils'
+import { getErrorMessage } from '../utils/error-utils'
+import path from 'path'
+
+interface RepoRow {
+  id: number
+  name?: string
+  repo_url?: string
+  local_path: string
+  source_path?: string
+  branch?: string
+  default_branch: string
+  clone_status: string
+  cloned_at: number
+  last_pulled?: number
+  last_accessed_at?: number
+  opencode_config_name?: string
+  is_worktree?: number
+  is_local?: number
+}
+
+const REPO_GIT_CREDENTIAL_SETTING_KEY = 'gitCredentialId'
+
+function rowToRepo(row: RepoRow): Repo {
+  const fullPath = row.source_path || path.join(getReposPath(), row.local_path)
+
+  return {
+    id: row.id,
+    name: row.name ?? undefined,
+    repoUrl: row.repo_url,
+    localPath: row.local_path,
+    fullPath,
+    sourcePath: row.source_path,
+    branch: row.branch,
+    defaultBranch: row.default_branch,
+    cloneStatus: row.clone_status as Repo['cloneStatus'],
+    clonedAt: row.cloned_at,
+    lastPulled: row.last_pulled,
+    lastAccessedAt: row.last_accessed_at,
+    openCodeConfigName: row.opencode_config_name,
+    isWorktree: row.is_worktree ? Boolean(row.is_worktree) : undefined,
+    isLocal: row.is_local ? Boolean(row.is_local) : undefined,
+  }
+}
+
+export function getRepoSetting(db: Database, repoId: number, key: string): string | null {
+  const row = db
+    .prepare('SELECT value FROM repo_settings WHERE repo_id = ? AND key = ?')
+    .get(repoId, key) as { value: string } | undefined
+
+  return row?.value ?? null
+}
+
+export function setRepoSetting(db: Database, repoId: number, key: string, value: string | null): void {
+  const now = Date.now()
+  const updateSetting = db.transaction(() => {
+    if (value === null || value === '') {
+      db.prepare('DELETE FROM repo_settings WHERE repo_id = ? AND key = ?').run(repoId, key)
+      return
+    }
+
+    db.prepare(`
+      INSERT INTO repo_settings (repo_id, key, value, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(repo_id, key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `).run(repoId, key, value, now)
+  })
+
+  updateSetting()
+}
+
+export function getRepoGitCredentialId(db: Database, repoId: number): string | null {
+  return getRepoSetting(db, repoId, REPO_GIT_CREDENTIAL_SETTING_KEY)
+}
+
+export function setRepoGitCredentialId(db: Database, repoId: number, credentialId: string | null): void {
+  setRepoSetting(db, repoId, REPO_GIT_CREDENTIAL_SETTING_KEY, credentialId)
+}
+
+export function getRepoByDirectory(db: Database, directory: string): Repo | null {
+  const resolvedDirectory = path.resolve(directory)
+  const repos = listRepos(db)
+
+  return repos
+    .filter((repo) => {
+      const resolvedRepoPath = path.resolve(repo.fullPath)
+      const relativePath = path.relative(resolvedRepoPath, resolvedDirectory)
+      return relativePath === '' || (!!relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath))
+    })
+    .sort((a, b) => b.fullPath.length - a.fullPath.length)[0] ?? null
+}
+
+const TABLES_WITH_REPO_ID = ['schedule_jobs', 'schedule_runs', 'repo_settings'] as const
+type RepoIdTable = typeof TABLES_WITH_REPO_ID[number]
+
+function updateRepoIdReference(db: Database, tableName: RepoIdTable, fromRepoId: number, toRepoId: number): void {
+  db.prepare(`UPDATE ${tableName} SET repo_id = ? WHERE repo_id = ?`).run(toRepoId, fromRepoId)
+}
+
+export function getRepoById(db: Database, id: number): Repo | null {
+  const stmt = db.prepare('SELECT * FROM repos WHERE id = ?')
+  const row = stmt.get(id) as RepoRow | undefined
+  
+  return row ? rowToRepo(row) : null
+}
+
+export function ensureAssistantRepo(db: Database): Repo {
+  const now = Date.now()
+
+  const syncAssistantRepo = db.transaction(() => {
+    const existingAssistantPathRow = db.prepare('SELECT id FROM repos WHERE local_path = ? AND id != ?')
+      .get(ASSISTANT_REPO_PATH, ASSISTANT_REPO_ID) as { id: number } | undefined
+
+    if (existingAssistantPathRow) {
+      for (const table of TABLES_WITH_REPO_ID) {
+        updateRepoIdReference(db, table, existingAssistantPathRow.id, ASSISTANT_REPO_ID)
+      }
+      db.prepare('DELETE FROM repos WHERE id = ?').run(existingAssistantPathRow.id)
+    }
+
+    db.prepare(`
+      INSERT INTO repos (
+        id,
+        repo_url,
+        local_path,
+        source_path,
+        branch,
+        default_branch,
+        clone_status,
+        cloned_at,
+        last_accessed_at,
+        is_worktree,
+        is_local
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        repo_url = excluded.repo_url,
+        local_path = excluded.local_path,
+        source_path = excluded.source_path,
+        branch = excluded.branch,
+        default_branch = excluded.default_branch,
+        clone_status = excluded.clone_status,
+        last_accessed_at = excluded.last_accessed_at,
+        is_worktree = excluded.is_worktree,
+        is_local = excluded.is_local
+    `).run(
+      ASSISTANT_REPO_ID,
+      null,
+      ASSISTANT_REPO_PATH,
+      null,
+      null,
+      'main',
+      'ready',
+      now,
+      now,
+      0,
+      0,
+    )
+  })
+
+  syncAssistantRepo()
+
+  const repo = getRepoById(db, ASSISTANT_REPO_ID)
+  if (!repo) {
+    throw new Error('Failed to sync Assistant repository')
+  }
+
+  return repo
+}
+
+export function createRepo(db: Database, repo: CreateRepoInput): Repo {
+  const normalizedPath = repo.localPath.trim().replace(/\/+$/, '')
+  
+  const existing = repo.isLocal 
+    ? repo.sourcePath
+      ? getRepoBySourcePath(db, repo.sourcePath) ?? getRepoByLocalPath(db, normalizedPath)
+      : getRepoByLocalPath(db, normalizedPath)
+    : getRepoByUrlAndBranch(db, repo.repoUrl, repo.branch)
+  
+  if (existing) {
+    return existing
+  }
+  
+  const stmt = db.prepare(`
+    INSERT INTO repos (repo_url, local_path, source_path, branch, default_branch, clone_status, cloned_at, last_accessed_at, is_worktree, is_local)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  
+  try {
+    const result = stmt.run(
+      repo.repoUrl || null,
+      normalizedPath,
+      repo.sourcePath || null,
+      repo.branch || null,
+      repo.defaultBranch,
+      repo.cloneStatus,
+      repo.clonedAt,
+      repo.clonedAt,
+      repo.isWorktree ? 1 : 0,
+      repo.isLocal ? 1 : 0
+    )
+    
+    const newRepo = getRepoById(db, Number(result.lastInsertRowid))
+    if (!newRepo) {
+      throw new Error(`Failed to retrieve newly created repo with id ${result.lastInsertRowid}`)
+    }
+    return newRepo
+  } catch (error: unknown) {
+    const errorMessage = getErrorMessage(error)
+    if (errorMessage.includes('UNIQUE constraint failed') || (error && typeof error === 'object' && 'code' in error && error.code === 'SQLITE_CONSTRAINT_UNIQUE')) {
+      const conflictRepo = repo.isLocal 
+        ? repo.sourcePath
+          ? getRepoBySourcePath(db, repo.sourcePath) ?? getRepoByLocalPath(db, normalizedPath)
+          : getRepoByLocalPath(db, normalizedPath)
+        : getRepoByUrlAndBranch(db, repo.repoUrl, repo.branch)
+      
+      if (conflictRepo) {
+        return conflictRepo
+      }
+      
+      const identifier = repo.isLocal ? `path '${normalizedPath}'` : `url '${repo.repoUrl}' branch '${repo.branch || 'default'}'`
+      throw new Error(`Repository with ${identifier} already exists but could not be retrieved. This may indicate database corruption.`)
+    }
+    
+    throw new Error(`Failed to create repository: ${errorMessage}`)
+  }
+}
+
+export function getRepoByUrlAndBranch(db: Database, repoUrl: string, branch?: string): Repo | null {
+  const query = branch 
+    ? 'SELECT * FROM repos WHERE repo_url = ? AND branch = ?'
+    : 'SELECT * FROM repos WHERE repo_url = ? AND branch IS NULL'
+  
+  const stmt = db.prepare(query)
+  const row = branch 
+    ? stmt.get(repoUrl, branch) as RepoRow | undefined
+    : stmt.get(repoUrl) as RepoRow | undefined
+  
+  return row ? rowToRepo(row) : null
+}
+
+export function getRepoByLocalPath(db: Database, localPath: string): Repo | null {
+  const stmt = db.prepare('SELECT * FROM repos WHERE local_path = ?')
+  const row = stmt.get(localPath) as RepoRow | undefined
+  
+  return row ? rowToRepo(row) : null
+}
+
+export function getRepoBySourcePath(db: Database, sourcePath: string): Repo | null {
+  const stmt = db.prepare('SELECT * FROM repos WHERE source_path = ?')
+  const row = stmt.get(sourcePath) as RepoRow | undefined
+
+  return row ? rowToRepo(row) : null
+}
+
+export function listRepos(db: Database, repoOrder?: number[]): Repo[] {
+  const stmt = db.prepare('SELECT * FROM repos ORDER BY cloned_at DESC')
+  const rows = stmt.all() as RepoRow[]
+  const repos = rows.map(rowToRepo)
+
+  if (!repoOrder || repoOrder.length === 0) {
+    return repos
+  }
+
+  const orderMap = new Map(repoOrder.map((id, index) => [id, index]))
+  const orderedRepos = repos
+    .filter((repo) => orderMap.has(repo.id))
+    .sort((a, b) => {
+      const indexA = orderMap.get(a.id)!
+      const indexB = orderMap.get(b.id)!
+      return indexA - indexB
+    })
+
+  const remainingRepos = repos
+    .filter((repo) => !orderMap.has(repo.id))
+    .sort((a, b) => {
+      const nameA = getRepoName(a).toLowerCase()
+      const nameB = getRepoName(b).toLowerCase()
+      return nameA.localeCompare(nameB)
+    })
+
+  return [...orderedRepos, ...remainingRepos]
+}
+
+export function getRepoName(repo: Repo): string {
+  return getRepoDisplayName(repo)
+}
+
+export function updateRepoStatus(db: Database, id: number, cloneStatus: Repo['cloneStatus']): void {
+  const stmt = db.prepare('UPDATE repos SET clone_status = ? WHERE id = ?')
+  const result = stmt.run(cloneStatus, id)
+  if (result.changes === 0) {
+    throw new Error(`Repository with id ${id} not found`)
+  }
+}
+
+export function updateRepoConfigName(db: Database, id: number, configName: string): void {
+  const stmt = db.prepare('UPDATE repos SET opencode_config_name = ? WHERE id = ?')
+  const result = stmt.run(configName, id)
+  if (result.changes === 0) {
+    throw new Error(`Repository with id ${id} not found`)
+  }
+}
+
+export function updateLastPulled(db: Database, id: number): void {
+  const stmt = db.prepare('UPDATE repos SET last_pulled = ? WHERE id = ?')
+  const result = stmt.run(Date.now(), id)
+  if (result.changes === 0) {
+    throw new Error(`Repository with id ${id} not found`)
+  }
+}
+
+export function updateLastAccessed(db: Database, id: number): void {
+  const stmt = db.prepare('UPDATE repos SET last_accessed_at = ? WHERE id = ?')
+  const result = stmt.run(Date.now(), id)
+  if (result.changes === 0) {
+    throw new Error(`Repository with id ${id} not found`)
+  }
+}
+
+export function updateRepoBranch(db: Database, id: number, branch: string): void {
+  const stmt = db.prepare('UPDATE repos SET branch = ? WHERE id = ?')
+  const result = stmt.run(branch, id)
+  if (result.changes === 0) {
+    throw new Error(`Repository with id ${id} not found`)
+  }
+}
+
+export function updateRepoName(db: Database, id: number, name: string | null): void {
+  const stmt = db.prepare('UPDATE repos SET name = ? WHERE id = ?')
+  const result = stmt.run(name, id)
+  if (result.changes === 0) {
+    throw new Error(`Repository with id ${id} not found`)
+  }
+}
+
+export function deleteRepo(db: Database, id: number): void {
+  if (id === ASSISTANT_REPO_ID) {
+    return
+  }
+
+  for (const table of TABLES_WITH_REPO_ID) {
+    db.prepare(`DELETE FROM ${table} WHERE repo_id = ?`).run(id)
+  }
+  const stmt = db.prepare('DELETE FROM repos WHERE id = ?')
+  stmt.run(id)
+}

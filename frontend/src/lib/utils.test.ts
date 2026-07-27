@@ -1,0 +1,149 @@
+import { describe, it, expect, afterEach } from 'vitest'
+import { getRepoDisplayName, sanitizeForTTS, randomId } from './utils'
+
+describe('sanitizeForTTS', () => {
+  it('should handle headers', () => {
+    expect(sanitizeForTTS('# Main Header\n## Sub Header\n### Detail')).toBe('Main Header\nSub Header\nDetail')
+  })
+
+  it('should handle bullet lists', () => {
+    expect(sanitizeForTTS('- Milk\n- Eggs\n* Bread')).toBe('Milk\nEggs\nBread')
+  })
+
+  it('should handle numbered lists', () => {
+    expect(sanitizeForTTS('1. First\n2. Second')).toBe('First\nSecond')
+  })
+
+  it('should remove inline code but keep content', () => {
+    expect(sanitizeForTTS('Use `const x = 1` here')).toBe('Use const x = 1 here')
+  })
+
+  it('should remove code blocks entirely', () => {
+    expect(sanitizeForTTS('Start\n```\ncode\n```\nEnd')).toBe('Start\nEnd')
+  })
+
+  it('should handle bold formatting', () => {
+    expect(sanitizeForTTS('This is **bold** text')).toBe('This is bold text')
+  })
+
+  it('should handle italic formatting', () => {
+    expect(sanitizeForTTS('Simple *italic* example')).toBe('Simple italic example')
+  })
+
+  it('should remove markdown links but keep display text', () => {
+    expect(sanitizeForTTS('Visit [OpenCode](https://opencode.ai)')).toBe('Visit OpenCode')
+  })
+
+  it('should handle images and tables', () => {
+    expect(sanitizeForTTS('See ![diagram](url) below:\n|A|B|\n|-|-|\n|1|2|')).toBe('See diagram below:\nA B\n1 2')
+  })
+
+  it('should handle blockquotes', () => {
+    expect(sanitizeForTTS('> Important\n> Note')).toBe('Important\nNote')
+  })
+
+  it('should remove citations and footnotes', () => {
+    expect(sanitizeForTTS('See [1] and [^2] for more')).toBe('See and for more')
+  })
+
+  it('should handle strikethrough', () => {
+    expect(sanitizeForTTS('~~removed~~')).toBe('removed')
+  })
+
+  it('should handle complex mixed content', () => {
+    const input = '# Results\nFunction: `calc()`\nSee [doc](url):\n- A\n- B'
+    const expected = 'Results\nFunction: calc()\nSee doc:\nA\nB'
+    expect(sanitizeForTTS(input)).toBe(expected)
+  })
+
+  it('should remove horizontal rules', () => {
+    expect(sanitizeForTTS('Before\n---\nAfter')).toBe('Before\nAfter')
+  })
+
+  it('should normalize whitespace', () => {
+    expect(sanitizeForTTS('Line 1\n\n\nLine 2')).toBe('Line 1\nLine 2')
+  })
+
+  it('should fix punctuation spacing', () => {
+    expect(sanitizeForTTS('Hello , world !')).toBe('Hello, world!')
+  })
+
+  it('should return empty string for empty input', () => {
+    expect(sanitizeForTTS('')).toBe('')
+    expect(sanitizeForTTS('   ')).toBe('')
+    expect(sanitizeForTTS(null as unknown as string)).toBe('')
+  })
+
+  it('should handle headers and lists combined', () => {
+    expect(sanitizeForTTS('## Shopping List\n- Milk\n- Eggs')).toBe('Shopping List\nMilk\nEggs')
+  })
+
+  it('should handle HTML tags', () => {
+    expect(sanitizeForTTS('Text with <tag>content</tag> here')).toBe('Text with content here')
+  })
+})
+
+describe('randomId', () => {
+  const originalRandomUUID = globalThis.crypto?.randomUUID
+
+  afterEach(() => {
+    if (globalThis.crypto) {
+      Object.defineProperty(globalThis.crypto, 'randomUUID', {
+        value: originalRandomUUID,
+        configurable: true,
+        writable: true,
+      })
+    }
+  })
+
+  it('uses crypto.randomUUID when available', () => {
+    Object.defineProperty(globalThis.crypto, 'randomUUID', {
+      value: () => '11111111-2222-4333-8444-555555555555',
+      configurable: true,
+      writable: true,
+    })
+    expect(randomId()).toBe('11111111-2222-4333-8444-555555555555')
+  })
+
+  it('falls back to a unique id when crypto.randomUUID is unavailable (non-secure context)', () => {
+    Object.defineProperty(globalThis.crypto, 'randomUUID', {
+      value: undefined,
+      configurable: true,
+      writable: true,
+    })
+    const first = randomId()
+    const second = randomId()
+    expect(first).toMatch(/^[a-z0-9]+-[a-z0-9]+$/)
+    expect(first).not.toBe(second)
+  })
+})
+
+describe('getRepoDisplayName', () => {
+  it('prefers name when present', () => {
+    expect(getRepoDisplayName({ name: 'Fork A', repoUrl: 'https://github.com/x/y.git' })).toBe('Fork A')
+  })
+
+  it('trims and ignores empty name', () => {
+    expect(getRepoDisplayName({ name: '   ', repoUrl: 'https://github.com/x/y.git' })).toBe('y')
+  })
+
+  it('falls back to repoUrl basename stripping .git', () => {
+    expect(getRepoDisplayName({ repoUrl: 'https://github.com/user/repo.git' })).toBe('repo')
+  })
+
+  it('falls back to sourcePath basename', () => {
+    expect(getRepoDisplayName({ sourcePath: '/home/user/projects/my-repo' })).toBe('my-repo')
+  })
+
+  it('falls back to the localPath basename', () => {
+    expect(getRepoDisplayName({ localPath: '/some/path' })).toBe('path')
+  })
+
+  it('falls back to Repository when all are empty', () => {
+    expect(getRepoDisplayName({})).toBe('Repository')
+  })
+
+  it('handles null values properly', () => {
+    expect(getRepoDisplayName({ repoUrl: null, localPath: null, sourcePath: null })).toBe('Repository')
+  })
+})
