@@ -86,7 +86,14 @@ RUN echo "Installing uv=${UV_VERSION} opencode=${OPENCODE_VERSION} (cachebust=${
     chmod 755 /opt/opencode/bin/opencode && \
     rm -f /tmp/opencode.tar.gz && \
     ln -s /opt/opencode/bin/opencode /usr/local/bin/opencode && \
-    echo "opencode ${OPENCODE_VERSION} installed successfully"
+    echo "opencode ${OPENCODE_VERSION} installed successfully" && \
+    echo "Installing claude-agent-rs..." && \
+    curl -LsSf https://sh.rustup.rs | sh -s -- -y && \
+    . "$HOME/.cargo/env" && \
+    cargo install claude-agent-rs && \
+    mv "$HOME/.cargo/bin/claude-agent" /usr/local/bin/claude-agent && \
+    rm -rf "$HOME/.cargo" /root/.rustup && \
+    echo "claude-agent-rs installed successfully"
 
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
