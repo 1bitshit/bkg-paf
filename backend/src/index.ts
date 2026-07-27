@@ -38,6 +38,7 @@ import { createSessionPinRoutes } from './routes/session-pins'
 import { createPluginsRoutes } from './routes/plugins'
 import { createAgentRoutes } from './routes/agents'
 import { createProviderManagementRoutes } from './routes/provider-management'
+import { createDockerRoutes } from './routes/docker'
 import { createInternalRoutes } from './routes/internal'
 import { sweepStaleUploadSessions } from './routes/internal/repo-mirror-helpers'
 import { createOpenCodeProxyRoutes } from './routes/opencode-proxy'
@@ -414,6 +415,7 @@ protectedApi.route('/plugins', createPluginsRoutes(db, openCodeClient))
 protectedApi.route('/schedules', createScheduleRoutes(scheduleService))
 protectedApi.route('/agents', createAgentRoutes(getAgentRegistry()))
 protectedApi.route('/provider-management', createProviderManagementRoutes(db, openCodeClient, openCodeSupervisor))
+protectedApi.route('/docker', createDockerRoutes())
 
 app.route('/api', protectedApi)
 
