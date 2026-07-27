@@ -1,0 +1,14 @@
+packages:
+  - 'shared'
+  - 'backend'
+  - 'frontend'
+  - 'ocm-cli'
+  - '!workspace/**'
+
+packageExtensions:
+  '@hookform/resolvers':
+    peerDependencies:
+      zod: '*'
+    peerDependenciesMeta:
+      zod:
+        optional: true
