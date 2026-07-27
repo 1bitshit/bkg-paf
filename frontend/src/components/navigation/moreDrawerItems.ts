@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react'
-import { Plug, Sparkles, ShieldOff, CalendarClock, GitCommitHorizontal, Code2, Settings, LogOut, Plus, Bot, Folder, Clock, SquarePlus, Activity, Layers, Cpu, Triangle, CircleGauge } from 'lucide-react'
+import { Plug, Sparkles, ShieldOff, CalendarClock, GitCommitHorizontal, Code2, Settings, LogOut, Plus, Bot, Folder, Clock, SquarePlus, Activity, Layers, Cpu, CircleGauge } from 'lucide-react'
 import { getAssistantPath, isAssistantPath } from '@/lib/navigation'
 
 export interface MoreDrawerItem {
@@ -39,7 +39,6 @@ function getBaseItems(): MoreDrawerItem[] {
   return [
     { key: 'agents', label: 'Agents', icon: Cpu, to: '/agents' },
     { key: 'providers', label: 'Providers', icon: CircleGauge, to: '/providers' },
-    { key: 'nim', label: 'NVIDIA NIM', icon: Triangle, to: '/nim' },
     { key: 'monitor', label: 'Monitor', icon: Activity, to: '/monitor' },
     { key: 'plugins', label: 'Plugins', icon: Layers, to: '/plugins' },
     { key: 'settings', label: 'Settings', icon: Settings },

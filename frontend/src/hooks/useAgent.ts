@@ -1,8 +1,9 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   listAgents,
   getAgent,
   listAgentSessions,
+  createAgentSession,
   type AgentSession,
 } from '@/api/agents'
 
@@ -57,5 +58,17 @@ export function useAllAgentSessions() {
     enabled,
     staleTime: 10_000,
     refetchInterval: 15_000,
+  })
+}
+
+export function useCreateAgentSession() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ agentId, title }: { agentId: string; title?: string }) =>
+      createAgentSession(agentId, { title }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['agents'] })
+      queryClient.invalidateQueries({ queryKey: ['agents', 'all-sessions'] })
+    },
   })
 }

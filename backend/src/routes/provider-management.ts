@@ -219,7 +219,9 @@ export function createProviderManagementRoutes(
   app.get('/:id', async (c) => {
     try {
       const providerId = c.req.param('id')
-      const providers = await readConfigProviders(configPath)
+      const fileProviders = await readConfigProviders(configPath)
+      const dbProviders = readProvidersFromDb(settingsService)
+      const providers = { ...dbProviders, ...fileProviders }
       const data = providers[providerId]
 
       if (!data || typeof data !== 'object') {

@@ -1,9 +1,11 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Header } from '@/components/ui/header'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { useAgentsList, useAllAgentSessions } from '@/hooks/useAgent'
+import { useAgentsList, useAllAgentSessions, useCreateAgentSession } from '@/hooks/useAgent'
 import {
   Bot,
   Cpu,
@@ -17,6 +19,7 @@ import {
   Globe,
   Wrench,
   DollarSign,
+  SquarePlus,
 } from 'lucide-react'
 
 type AgentsTab = 'overview' | 'sessions'
@@ -83,8 +86,10 @@ function CapabilityBadge({ name, enabled }: { name: string; enabled: boolean }) 
 
 export function Agents() {
   const [tab, setTab] = useState<AgentsTab>('overview')
+  const navigate = useNavigate()
   const { data: agents = [], isLoading } = useAgentsList()
   const { data: allSessions = [], isLoading: sessionsLoading } = useAllAgentSessions()
+  const createSessionMutation = useCreateAgentSession()
 
   const totalSessions = allSessions.length
   const totalCost = allSessions.reduce((sum, s) => sum + (s.cost ?? 0), 0)
@@ -92,6 +97,17 @@ export function Agents() {
     if (!s.tokens) return sum
     return sum + s.tokens.input + s.tokens.output
   }, 0)
+
+  const handleCreateSession = (agentId: string) => {
+    createSessionMutation.mutate(
+      { agentId, title: 'New Session' },
+      {
+        onSuccess: (session) => {
+          navigate(`/repos/0/sessions/${session.id}`)
+        },
+      }
+    )
+  }
 
   return (
     <div className="h-dvh max-h-dvh overflow-hidden bg-background flex flex-col">
@@ -168,7 +184,7 @@ export function Agents() {
 
               <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
                 {agents.map(agent => (
-                  <AgentCard key={agent.id} agent={agent} />
+                  <AgentCard key={agent.id} agent={agent} onCreateSession={handleCreateSession} />
                 ))}
               </div>
             </div>
@@ -197,7 +213,7 @@ export function Agents() {
   )
 }
 
-function AgentCard({ agent }: { agent: import('@/api/agents').AgentInfo }) {
+function AgentCard({ agent, onCreateSession }: { agent: import('@/api/agents').AgentInfo; onCreateSession: (agentId: string) => void }) {
   return (
     <Card className="border-border/70 bg-card/60 transition-all hover:shadow-md">
       <CardContent className="p-4 space-y-3">
@@ -229,6 +245,18 @@ function AgentCard({ agent }: { agent: import('@/api/agents').AgentInfo }) {
             {agent.health.error}
           </div>
         )}
+
+        <div className="pt-2 border-t border-border/50">
+          <Button
+            size="sm"
+            variant="outline"
+            className="w-full"
+            onClick={() => onCreateSession(agent.id)}
+          >
+            <SquarePlus className="h-4 w-4 mr-1.5" />
+            New Session
+          </Button>
+        </div>
       </CardContent>
     </Card>
   )

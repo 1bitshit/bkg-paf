@@ -56,7 +56,7 @@ import { getOpenCodeImportStatus, syncOpenCodeImport } from './services/opencode
 import { OpenCodeSupervisor } from './services/opencode-supervisor'
 import { OpenCodeRestartCoordinator } from './services/opencode-restart-coordinator'
 import { setOpenCodeRestartCoordinator } from './services/opencode-restart'
-import { getAgentRegistry, OpenCodeAdapter, OpenClaudeAdapter, NimAdapter } from './agents'
+import { getAgentRegistry, OpenCodeAdapter, OpenClaudeAdapter, PiAdapter } from './agents'
 import { OpenCodeConfigSchema } from '@opencode-manager/shared/schemas'
 import { parse as parseJsonc } from 'jsonc-parser'
 import { getModelStatePath, ModelStateSchema } from './routes/providers'
@@ -316,13 +316,15 @@ try {
     logger.warn('OpenClaude adapter failed to start:', err)
   })
 
-  const nimAdapter = new NimAdapter({
-    apiKey: ENV.NIM?.API_KEY || undefined,
-    baseUrl: ENV.NIM?.BASE_URL || undefined,
-  })
-  agentRegistry.register(nimAdapter)
-  nimAdapter.start().catch((err) => {
-    logger.warn('NIM adapter failed to start:', err)
+  const piConfig: Record<string, string> = {}
+  if (ENV.OPENCLAUDE?.WORKING_DIR) piConfig.workingDir = ENV.OPENCLAUDE.WORKING_DIR
+  if (process.env.PI_API_KEY) piConfig.apiKey = process.env.PI_API_KEY
+  if (process.env.PI_MODEL) piConfig.model = process.env.PI_MODEL
+  if (process.env.PI_PROVIDER) piConfig.provider = process.env.PI_PROVIDER
+  const piAdapter = new PiAdapter(piConfig)
+  agentRegistry.register(piAdapter)
+  piAdapter.start().catch((err) => {
+    logger.warn('PI adapter failed to start:', err)
   })
 
 } catch (error) {
