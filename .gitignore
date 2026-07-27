@@ -19,7 +19,7 @@ workspace/
 /config/
 temp/
 .forge/
-
+/home/workspace/work/beta/bkg-paf/agent-cli
 .kilocodemodes
 .autoclaw/*
 .clinerules/*
