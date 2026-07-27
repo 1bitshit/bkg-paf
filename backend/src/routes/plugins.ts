@@ -5,6 +5,8 @@ import { getOpenCodeConfigFilePath } from '@opencode-manager/shared/config/env'
 import { readFileContent, fileExists } from '../services/file-operations'
 import { parse as parseJsonc } from 'jsonc-parser'
 import { logger } from '../utils/logger'
+import * as path from 'path'
+import * as os from 'os'
 
 interface PluginEntry {
   name: string
@@ -58,6 +60,23 @@ export function createPluginsRoutes(db: Database, openCodeClient: OpenCodeClient
           model: config.model as string | undefined,
           smallModel: config.small_model as string | undefined,
           defaultAgent: config.default_agent as string | undefined,
+        }
+      }
+
+      if (pluginList.length === 0) {
+        const homeConfigPath = path.join(os.homedir(), '.config', 'opencode', 'opencode.json')
+        if (await fileExists(homeConfigPath)) {
+          const rawContent = await readFileContent(homeConfigPath)
+          const config = parseJsonc(rawContent) as Record<string, unknown>
+          pluginList = Array.isArray(config.plugin) ? (config.plugin as string[]) : []
+          pluginOptions = (config.pluginOptions as Record<string, unknown>) ?? {}
+          if (!modelConfig.model) {
+            modelConfig = {
+              model: config.model as string | undefined,
+              smallModel: config.small_model as string | undefined,
+              defaultAgent: config.default_agent as string | undefined,
+            }
+          }
         }
       }
 
