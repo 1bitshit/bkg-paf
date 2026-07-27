@@ -52,6 +52,16 @@ interface ProviderEntry {
   hasApiKey?: boolean
 }
 
+function readProvidersFromDb(settingsService: SettingsService): Record<string, unknown> {
+  try {
+    const config = settingsService.getDefaultOpenCodeConfig()
+    if (!config?.content?.provider) return {}
+    return config.content.provider as Record<string, unknown>
+  } catch {
+    return {}
+  }
+}
+
 async function readConfigProviders(configPath: string): Promise<Record<string, unknown>> {
   if (!(await fileExists(configPath))) return {}
   const raw = await readFileContent(configPath)
@@ -105,8 +115,19 @@ export function createProviderManagementRoutes(
 
   app.get('/', async (c) => {
     try {
-      const configProviders = await readConfigProviders(configPath)
-      const result: ProviderEntry[] = []
+      const fileProviders = await readConfigProviders(configPath)
+      const dbProviders = readProvidersFromDb(settingsService)
+
+      const mergedConfig: Record<string, unknown> = { ...dbProviders }
+      for (const [id, data] of Object.entries(fileProviders)) {
+        if (!(id in mergedConfig)) {
+          mergedConfig[id] = data
+        } else {
+          const dbData = mergedConfig[id] as Record<string, unknown>
+          const fileData = data as Record<string, unknown>
+          mergedConfig[id] = { ...fileData, ...dbData }
+        }
+      }
 
       let serverProviders: Array<Record<string, unknown>> = []
       try {
@@ -127,12 +148,14 @@ export function createProviderManagementRoutes(
       }
 
       const allIds = new Set<string>([
-        ...Object.keys(configProviders),
+        ...Object.keys(mergedConfig),
         ...serverMap.keys(),
       ])
 
+      const result: ProviderEntry[] = []
+
       for (const id of allIds) {
-        const configData = configProviders[id]
+        const configData = mergedConfig[id]
         const serverData = serverMap.get(id)
 
         let name = id
