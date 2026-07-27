@@ -19,25 +19,6 @@ function runDocker(args: string[], timeout = 30_000): Promise<{ stdout: string; 
   })
 }
 
-function runDockerCompose(stackDir: string, args: string[], timeout = 60_000): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('docker', ['compose', ...args], {
-      cwd: stackDir,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout,
-    })
-
-    let stdout = ''
-    let stderr = ''
-
-    proc.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
-    proc.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
-
-    proc.on('error', reject)
-    proc.on('close', (exitCode) => { resolve({ stdout, stderr, exitCode }) })
-  })
-}
-
 export function createDockerRoutes(): Hono {
   const docker = new Hono()
 
@@ -119,31 +100,6 @@ export function createDockerRoutes(): Hono {
     }
 
     return c.json({ ok: true })
-  })
-
-  docker.get('/stacks', async (c) => {
-    const stacksDir = process.env.STACKS_DIR || '/workspace/stacks'
-    const result = await runDocker([
-      'compose', '-f', `${stacksDir}/docker-compose.yml`, 'ps', '--format', 'json',
-    ], 10_000)
-
-    if (result.exitCode !== 0) {
-      return c.json({ stacks: [], note: 'No stacks found or Docker Compose not available' })
-    }
-
-    const stacks = result.stdout
-      .split('\n')
-      .filter((l) => l.trim())
-      .map((line) => {
-        try {
-          return JSON.parse(line)
-        } catch {
-          return null
-        }
-      })
-      .filter(Boolean)
-
-    return c.json({ stacks })
   })
 
   docker.get('/images', async (c) => {
