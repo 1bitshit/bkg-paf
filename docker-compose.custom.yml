@@ -1,0 +1,60 @@
+services:
+  paf:
+    build:
+      context: ./opencode-manager
+      dockerfile: Dockerfile
+      args:
+        TOOLS_CACHEBUST: 1
+    container_name: bkg-paf
+    ports:
+      - "5003:5003"
+      - "5551:5551"
+    environment:
+      - NODE_ENV=production
+      - HOST=0.0.0.0
+      - PORT=5003
+      - OPENCODE_SERVER_PORT=5551
+      - OPENCODE_HOST=127.0.0.1
+      - DATABASE_PATH=/app/data/opencode.db
+      - WORKSPACE_PATH=/workspace
+      - AUTH_SECRET=${AUTH_SECRET:-changeme}
+      - AUTH_TRUSTED_ORIGINS=*
+      - AUTH_SECURE_COOKIES=false
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - bkg-workspace:/workspace
+      - bkg-data:/app/data
+      - ./opencode-config:/workspace/.config/opencode
+      - ./assistant:/workspace/repos/assistant
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./stacks:/workspace/stacks
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5003/api/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 40s
+
+  dockge:
+    image: louislam/dockge:1
+    container_name: bkg-dockge
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - dockge-data:/app/data
+      - ./stacks:/opt/stacks
+    environment:
+      - DOCKGE_STACKS_DIR=/opt/stacks
+      - PUID=1000
+      - PGID=1000
+
+volumes:
+  bkg-workspace:
+    driver: local
+  bkg-data:
+    driver: local
+  dockge-data:
+    driver: local
