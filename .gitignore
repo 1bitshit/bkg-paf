@@ -1,6 +1,7 @@
 node_modules/
 *.log
 .env
+*.test.js
 .env.local
 dist/
 build/
@@ -11,7 +12,6 @@ coverage/
 *.db-wal
 .vscode/
 .idea/
-*.test.js
 *.tsbuildinfo
 
 data/
