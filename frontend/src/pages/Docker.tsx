@@ -510,7 +510,7 @@ function StackDetail({ stackName, onBack }: { stackName: string; onBack: () => v
   if (loading) {
     return (
       <div className="h-full flex flex-col">
-        <Header title="Stack">
+        <Header><Header.Title>Stack</Header.Title></Header>
           <Button variant="outline" size="sm" onClick={onBack}>Back</Button>
         </Header>
         <div className="flex-1 flex items-center justify-center">
@@ -523,7 +523,7 @@ function StackDetail({ stackName, onBack }: { stackName: string; onBack: () => v
   if (!stack) {
     return (
       <div className="h-full flex flex-col">
-        <Header title="Stack Not Found">
+        <Header><Header.Title>Stack Not Found</Header.Title></Header>
           <Button variant="outline" size="sm" onClick={onBack}>Back</Button>
         </Header>
         <div className="flex-1 flex items-center justify-center text-muted-foreground">
@@ -535,7 +535,7 @@ function StackDetail({ stackName, onBack }: { stackName: string; onBack: () => v
 
   return (
     <div className="h-full flex flex-col">
-      <Header title={`Stack: ${stack.name}`}>
+      <Header><Header.Title>Stack: {stack.name}</Header.Title></Header>
         <div className="flex items-center gap-2">
           <StackStatusBadge status={stack.status} />
           <Button variant="outline" size="sm" onClick={onBack}>Back</Button>
@@ -950,7 +950,7 @@ export function Docker() {
 
   return (
     <div className="h-full flex flex-col">
-      <Header title="Docker">
+      <Header><Header.Title>Docker</Header.Title></Header>
         <Button variant="outline" size="sm" onClick={refresh}>
           <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
           Refresh
