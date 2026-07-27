@@ -56,7 +56,8 @@ import { getOpenCodeImportStatus, syncOpenCodeImport } from './services/opencode
 import { OpenCodeSupervisor } from './services/opencode-supervisor'
 import { OpenCodeRestartCoordinator } from './services/opencode-restart-coordinator'
 import { setOpenCodeRestartCoordinator } from './services/opencode-restart'
-import { getAgentRegistry, OpenCodeAdapter, OpenClaudeAdapter, PiAdapter } from './agents'
+import { getAgentRegistry, OpenCodeAdapter, OpenClaudeAdapter, PiAdapter, ClaudeAgentRsAdapter } from './agents'
+import type { ClaudeAgentRsConfig } from './agents'
 import { OpenCodeConfigSchema } from '@opencode-manager/shared/schemas'
 import { parse as parseJsonc } from 'jsonc-parser'
 import { getModelStatePath, ModelStateSchema } from './routes/providers'
@@ -325,6 +326,19 @@ try {
   agentRegistry.register(piAdapter)
   piAdapter.start().catch((err) => {
     logger.warn('PI adapter failed to start:', err)
+  })
+
+  const claudeAgentRsConfig: ClaudeAgentRsConfig = {}
+  if (ENV.OPENCLAUDE?.WORKING_DIR) claudeAgentRsConfig.workingDir = ENV.OPENCLAUDE.WORKING_DIR
+  if (process.env.CLAUDE_AGENT_RS_COMMAND) claudeAgentRsConfig.command = process.env.CLAUDE_AGENT_RS_COMMAND
+  if (process.env.ANTHROPIC_API_KEY) claudeAgentRsConfig.apiKey = process.env.ANTHROPIC_API_KEY
+  if (process.env.CLAUDE_AGENT_RS_MODEL) claudeAgentRsConfig.model = process.env.CLAUDE_AGENT_RS_MODEL
+  if (process.env.CLAUDE_AGENT_RS_BACKEND) claudeAgentRsConfig.backend = process.env.CLAUDE_AGENT_RS_BACKEND as 'cli' | 'api'
+  if (process.env.CLAUDE_AGENT_RS_AUTO_ROUTE === 'true') claudeAgentRsConfig.autoRoute = true
+  const claudeAgentRsAdapter = new ClaudeAgentRsAdapter(claudeAgentRsConfig)
+  agentRegistry.register(claudeAgentRsAdapter)
+  claudeAgentRsAdapter.start().catch((err) => {
+    logger.warn('Claude Agent RS adapter failed to start:', err)
   })
 
 } catch (error) {
