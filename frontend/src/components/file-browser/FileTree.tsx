@@ -1,9 +1,11 @@
 import { useState, memo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useMobile } from '@/hooks/useMobile'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { DeleteDialog } from '@/components/ui/delete-dialog'
 import { getFileApiUrl } from '@/api/files'
+import { createPendingStackFromFile, isStackSourceFile, writePendingStack } from '@/lib/stacks/pending-stack'
 import { 
   File, 
   Folder, 
@@ -13,7 +15,8 @@ import {
   MoreVertical,
   Trash2,
   Edit3,
-  Download
+  Download,
+  Layers
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -48,6 +51,7 @@ interface TreeNodeProps {
 
 function TreeNode({ file, level, onFileSelect, onDirectoryClick, selectedFile, onDelete, onRename }: TreeNodeProps) {
   const isMobile = useMobile()
+  const navigate = useNavigate()
   const [expanded, setExpanded] = useState(false)
   const [editing, setEditing] = useState(false)
   const [editName, setEditName] = useState(file.name)
@@ -102,6 +106,17 @@ function TreeNode({ file, level, onFileSelect, onDirectoryClick, selectedFile, o
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
+  }
+
+  const handleMakeStack = async () => {
+    if (!isStackSourceFile(file)) return
+
+    const response = await fetch(getFileApiUrl(file.path))
+    if (!response.ok) return
+
+    const fileData: FileInfo = await response.json()
+    writePendingStack(createPendingStackFromFile(fileData))
+    navigate('/docker')
   }
 
   const getFileIcon = () => {
@@ -196,6 +211,12 @@ function TreeNode({ file, level, onFileSelect, onDirectoryClick, selectedFile, o
               <DropdownMenuItem onClick={handleDownload}>
                 <Download className="w-4 h-4 mr-2" />
                 Download
+              </DropdownMenuItem>
+            )}
+            {isStackSourceFile(file) && (
+              <DropdownMenuItem onClick={handleMakeStack}>
+                <Layers className="w-4 h-4 mr-2" />
+                Make Stack
               </DropdownMenuItem>
             )}
             <DropdownMenuItem onClick={handleRename}>

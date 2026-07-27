@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { readPendingStack, type PendingStack } from '@/lib/stacks/pending-stack'
 import {
   Container,
   Play,
@@ -244,9 +245,9 @@ function StackCard({ stack, onSelect }: { stack: StackInfo; onSelect: (name: str
   )
 }
 
-function CreateStackDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (name: string) => void }) {
-  const [name, setName] = useState('')
-  const [composeYAML, setComposeYAML] = useState('services:\n  app:\n    image: nginx:alpine\n    ports:\n      - "8080:80"')
+function CreateStackDialog({ initialStack, onClose, onCreated }: { initialStack?: PendingStack | null; onClose: () => void; onCreated: (name: string) => void }) {
+  const [name, setName] = useState(initialStack?.name ?? '')
+  const [composeYAML, setComposeYAML] = useState(initialStack?.composeYAML ?? 'services:\n  app:\n    image: nginx:alpine\n    ports:\n      - "8080:80"')
   const [envContent, setEnvContent] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -872,6 +873,7 @@ export function Docker() {
   const [error, setError] = useState<string | null>(null)
   const [selectedStack, setSelectedStack] = useState<string | null>(null)
   const [showCreateStack, setShowCreateStack] = useState(false)
+  const [initialStack, setInitialStack] = useState<PendingStack | null>(null)
 
   const fetchContainers = useCallback(async () => {
     try {
@@ -925,6 +927,15 @@ export function Docker() {
     const interval = setInterval(fetchContainers, 10_000)
     return () => clearInterval(interval)
   }, [refresh, fetchContainers])
+
+  useEffect(() => {
+    const pendingStack = readPendingStack()
+    if (!pendingStack) return
+
+    setInitialStack(pendingStack)
+    setActiveTab('stacks')
+    setShowCreateStack(true)
+  }, [])
 
   const handleContainerAction = async (id: string, action: string) => {
     if (action === 'delete') {
@@ -1081,9 +1092,11 @@ export function Docker() {
 
       {showCreateStack && (
         <CreateStackDialog
+          initialStack={initialStack}
           onClose={() => setShowCreateStack(false)}
           onCreated={(name) => {
             setShowCreateStack(false)
+            setInitialStack(null)
             fetchStacks()
             setSelectedStack(name)
           }}
