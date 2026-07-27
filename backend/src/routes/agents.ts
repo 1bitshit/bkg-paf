@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import type { AgentRegistry } from '../agents/registry'
+import type { AgentAdapter, AgentHealth } from '../agents/types'
 import { logger } from '../utils/logger'
 
 const CreateSessionSchema = z.object({
@@ -19,14 +20,7 @@ export function createAgentRoutes(registry: AgentRegistry) {
     const adapters = registry.list()
     const result = await Promise.all(
       adapters.map(async (adapter) => {
-        const health = await adapter.healthCheck()
-        return {
-          id: adapter.id,
-          name: adapter.name,
-          description: adapter.description,
-          capabilities: adapter.capabilities,
-          health,
-        }
+        return getAgentInfo(adapter)
       })
     )
     return c.json(result)
@@ -38,14 +32,7 @@ export function createAgentRoutes(registry: AgentRegistry) {
     if (!adapter) {
       return c.json({ error: `Agent '${agentId}' not found` }, 404)
     }
-    const health = await adapter.healthCheck()
-    return c.json({
-      id: adapter.id,
-      name: adapter.name,
-      description: adapter.description,
-      capabilities: adapter.capabilities,
-      health,
-    })
+    return c.json(await getAgentInfo(adapter))
   })
 
   app.get('/:agentId/health', async (c) => {
@@ -187,4 +174,24 @@ export function createAgentRoutes(registry: AgentRegistry) {
   })
 
   return app
+}
+
+async function getAgentInfo(adapter: AgentAdapter) {
+  return {
+    id: adapter.id,
+    name: adapter.name,
+    description: adapter.description,
+    capabilities: adapter.capabilities,
+    health: await getAgentHealth(adapter),
+  }
+}
+
+async function getAgentHealth(adapter: AgentAdapter): Promise<AgentHealth> {
+  try {
+    return await adapter.healthCheck()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Agent health check failed'
+    logger.error(`Agent '${adapter.id}' health check failed:`, error)
+    return { healthy: false, state: 'error', error: message }
+  }
 }
