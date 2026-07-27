@@ -1,0 +1,119 @@
+import "../sw?worker";
+
+type UpdateCallback = () => void;
+
+let updateCallback: UpdateCallback | null = null;
+let updatePending = false;
+let updateNotified = false;
+
+function notifyUpdate() {
+  if (updateNotified) return;
+  if (!updateCallback) {
+    updatePending = true;
+    return;
+  }
+  updateNotified = true;
+  updatePending = false;
+  updateCallback();
+}
+
+export function onServiceWorkerUpdate(callback: UpdateCallback): void {
+  updateCallback = callback;
+  if (updatePending && !updateNotified) {
+    updateNotified = true;
+    updatePending = false;
+    callback();
+  }
+}
+
+export function offServiceWorkerUpdate(): void {
+  updateCallback = null;
+}
+
+const UPDATE_CHECK_INTERVAL_MS = 60 * 1000;
+
+async function unregisterServiceWorkerAndClearCaches(): Promise<void> {
+  try {
+    const registrations = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(registrations.map((registration) => registration.unregister()));
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((key) => caches.delete(key)));
+    }
+  } catch {
+    return;
+  }
+}
+
+export function registerServiceWorker(): void {
+  if (!("serviceWorker" in navigator)) return;
+
+  if (import.meta.env.DEV) {
+    void unregisterServiceWorkerAndClearCaches();
+    return;
+  }
+
+  const hadController = !!navigator.serviceWorker.controller;
+
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    if (event.data?.type === "SW_UPDATED") {
+      notifyUpdate();
+    }
+  });
+
+  navigator.serviceWorker
+    .register("/sw.js", { scope: "/" })
+    .then((registration) => {
+      if (registration.waiting && hadController) {
+        notifyUpdate();
+      }
+
+      registration.addEventListener("updatefound", () => {
+        const installing = registration.installing;
+        if (!installing) return;
+        installing.addEventListener("statechange", () => {
+          if (installing.state === "installed" && hadController) {
+            notifyUpdate();
+          }
+        });
+      });
+
+      let lastUpdateCheck = 0;
+      const checkForUpdate = () => {
+        const now = Date.now();
+        if (now - lastUpdateCheck < UPDATE_CHECK_INTERVAL_MS) return;
+        lastUpdateCheck = now;
+        registration.update().catch(() => {});
+      };
+
+      const onVisibilityChange = () => {
+        if (document.visibilityState === "visible") checkForUpdate();
+      };
+
+      document.addEventListener("visibilitychange", onVisibilityChange);
+      window.addEventListener("focus", checkForUpdate);
+      setInterval(checkForUpdate, UPDATE_CHECK_INTERVAL_MS);
+    })
+    .catch(() => {});
+}
+
+export async function getServiceWorkerRegistration(): Promise<ServiceWorkerRegistration | null> {
+  if (!("serviceWorker" in navigator)) return null;
+  return (await navigator.serviceWorker.getRegistration("/")) ?? null;
+}
+
+export function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  let rawData: string;
+  try {
+    rawData = window.atob(base64);
+  } catch {
+    throw new Error(`Invalid base64 string: ${base64String.slice(0, 20)}...`);
+  }
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}

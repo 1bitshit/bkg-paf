@@ -1,0 +1,1240 @@
+import fs from 'fs/promises'
+import { existsSync, rmSync, realpathSync } from 'node:fs'
+import { executeCommand } from '../utils/process'
+import { ensureDirectoryExists } from './file-operations'
+import { createRepo, getRepoByLocalPath, getRepoBySourcePath, getRepoById, updateRepoStatus, updateRepoBranch, updateLastPulled, deleteRepo, getRepoByUrlAndBranch } from '../db/queries'
+import type { Database } from 'bun:sqlite'
+import type { Repo, CreateRepoInput } from '../types/repo'
+import { logger } from '../utils/logger'
+import { getReposPath, getScheduleWorktreesPath } from '@opencode-manager/shared/config/env'
+import { normalizeRepoDirectoryName, sanitizeRepoDirectoryName, sanitizeBranchForDirectory, normalizeRepoUrlForCompare } from '@opencode-manager/shared/utils'
+import type { GitAuthService } from './git-auth'
+import { isGitHubHttpsUrl, isSSHUrl, normalizeSSHUrl } from '../utils/git-auth'
+import path from 'path'
+import { parseSSHHost } from '../utils/ssh-key-manager'
+import { getErrorMessage } from '../utils/error-utils'
+import { sseAggregator } from './sse-aggregator'
+import { resolveProjectId, isGitMainCheckout } from './project-id-resolver'
+import { listRepos } from '../db/queries'
+import { listActiveScheduleRunWorkspaces } from '../db/schedules'
+import { SettingsService } from './settings'
+import type { OpenCodeClient } from './opencode/client'
+import { mkdirSafe } from '../utils/fs-safe'
+
+const GIT_CLONE_TIMEOUT = 300000
+const DEFAULT_DISCOVERY_MAX_DEPTH = 4
+const DISCOVERY_SKIP_DIRECTORIES = new Set(['.git', 'node_modules'])
+
+function canonical(dir: string): string {
+  try {
+    return realpathSync(path.resolve(dir))
+  } catch {
+    return path.resolve(dir)
+  }
+}
+
+function enhanceCloneError(error: unknown, repoUrl: string, originalMessage: string): Error {
+  const message = originalMessage.toLowerCase()
+  
+  if (message.includes('authentication failed') || message.includes('could not authenticate') || message.includes('invalid credentials')) {
+    return new Error(`Authentication failed for ${repoUrl}. Please add your credentials in Settings > Git Credentials.`)
+  }
+  
+  if (message.includes('repository not found') || message.includes('404')) {
+    return new Error(`Repository not found: ${repoUrl}. Check the URL and ensure you have access to it.`)
+  }
+  
+  if (isSSHUrl(repoUrl) && message.includes('permission denied')) {
+    return new Error(`Access denied to ${repoUrl}. Please add your SSH credentials in Settings > Git Credentials and ensure your SSH key has access to this repository.`)
+  }
+  
+  if (isGitHubHttpsUrl(repoUrl) && (message.includes('permission denied') || message.includes('fatal'))) {
+    return new Error(`Access denied to ${repoUrl}. Please add your credentials in Settings > Git Credentials and ensure you have proper access.`)
+  }
+  
+  if (message.includes('timed out')) {
+    return new Error(`Clone timed out for ${repoUrl}. The repository might be too large or there could be network issues. Try again or verify the repository exists.`)
+  }
+  
+  return error instanceof Error ? error : new Error(originalMessage)
+}
+
+async function hasCommits(repoPath: string, env: Record<string, string>): Promise<boolean> {
+  try {
+    await executeCommand(['git', '-C', repoPath, 'rev-parse', 'HEAD'], { env, silent: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function isValidGitRepo(repoPath: string, env: Record<string, string>): Promise<boolean> {
+  try {
+    await executeCommand(['git', '-C', repoPath, 'rev-parse', '--git-dir'], { env, silent: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function normalizeInputPath(input: string): string {
+  return input.trim().replace(/[\\/]+$/, '')
+}
+
+function normalizeAbsolutePath(input: string): string {
+  return path.resolve(normalizeInputPath(input))
+}
+
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await fs.lstat(targetPath)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false
+    }
+    throw error
+  }
+}
+
+async function isGitRepoRootPath(targetPath: string): Promise<boolean> {
+  try {
+    const gitPath = path.join(targetPath, '.git')
+    const stats = await fs.lstat(gitPath)
+    return stats.isDirectory() || stats.isFile()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false
+    }
+    throw error
+  }
+}
+
+async function isGitWorktreeRepo(targetPath: string): Promise<boolean> {
+  try {
+    return (await fs.lstat(path.join(targetPath, '.git'))).isFile()
+  } catch {
+    return false
+  }
+}
+
+function buildWorkspaceAliasCandidates(sourcePath: string, rootPath?: string): string[] {
+  const candidates: string[] = []
+  const baseName = sanitizeRepoDirectoryName(path.basename(sourcePath))
+  candidates.push(baseName)
+
+  if (rootPath) {
+    const relativePath = path.relative(rootPath, sourcePath)
+    if (relativePath && !relativePath.startsWith('..')) {
+      const relativeAlias = relativePath
+        .split(path.sep)
+        .map(sanitizeRepoDirectoryName)
+        .filter(Boolean)
+        .join('--')
+
+      if (relativeAlias && !candidates.includes(relativeAlias)) {
+        candidates.push(relativeAlias)
+      }
+    }
+  }
+
+  return candidates
+}
+
+function getWorkspaceLocalPathForRepo(sourcePath: string): string | null {
+  const reposPath = path.resolve(getReposPath())
+  const normalizedSourcePath = path.resolve(sourcePath)
+
+  if (normalizedSourcePath === reposPath) {
+    return null
+  }
+
+  if (!normalizedSourcePath.startsWith(`${reposPath}${path.sep}`)) {
+    return null
+  }
+
+  return path.relative(reposPath, normalizedSourcePath)
+}
+
+async function isWorkspaceAliasAvailable(alias: string, sourcePath?: string): Promise<boolean> {
+  const aliasPath = path.join(getReposPath(), alias)
+
+  try {
+    const stats = await fs.lstat(aliasPath)
+    if (!sourcePath || !stats.isSymbolicLink()) {
+      return false
+    }
+
+    const existingTarget = await fs.readlink(aliasPath)
+    return path.resolve(path.dirname(aliasPath), existingTarget) === sourcePath
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return true
+    }
+    throw error
+  }
+}
+
+async function createWorkspaceLink(alias: string, sourcePath: string): Promise<void> {
+  const aliasPath = path.join(getReposPath(), alias)
+  const available = await isWorkspaceAliasAvailable(alias, sourcePath)
+
+  if (!available) {
+    throw new Error(`A repository named '${alias}' already exists in the workspace. Please remove it first or use a different source directory.`)
+  }
+
+  if (await pathExists(aliasPath)) {
+    return
+  }
+
+  await mkdirSafe(path.dirname(aliasPath))
+  await fs.symlink(sourcePath, aliasPath, process.platform === 'win32' ? 'junction' : 'dir')
+}
+
+async function pickWorkspaceAlias(database: Database, sourcePath: string, rootPath?: string): Promise<string> {
+  const existingRepo = getRepoBySourcePath(database, sourcePath)
+  if (existingRepo) {
+    return existingRepo.localPath
+  }
+
+  const candidates = buildWorkspaceAliasCandidates(sourcePath, rootPath)
+  for (const candidate of candidates) {
+    const existingByLocalPath = getRepoByLocalPath(database, candidate)
+    if (!existingByLocalPath && await isWorkspaceAliasAvailable(candidate, sourcePath)) {
+      return candidate
+    }
+  }
+
+  const baseCandidate = candidates[0] || 'repo'
+  let suffix = 2
+  while (true) {
+    const candidate = `${baseCandidate}-${suffix}`
+    const existingByLocalPath = getRepoByLocalPath(database, candidate)
+    if (!existingByLocalPath && await isWorkspaceAliasAvailable(candidate, sourcePath)) {
+      return candidate
+    }
+    suffix += 1
+  }
+}
+
+
+async function safeGetCurrentBranch(repoPath: string, env: Record<string, string>): Promise<string | null> {
+  try {
+    const repoHasCommits = await hasCommits(repoPath, env)
+    if (!repoHasCommits) {
+      try {
+        const symbolicRef = await executeCommand(['git', '-C', repoPath, 'symbolic-ref', '--short', 'HEAD'], { env, silent: true })
+        return symbolicRef.trim()
+      } catch {
+        return null
+      }
+    }
+    const currentBranch = await executeCommand(['git', '-C', repoPath, 'rev-parse', '--abbrev-ref', 'HEAD'], { env, silent: true })
+    return currentBranch.trim()
+  } catch {
+    return null
+  }
+}
+
+async function findGitRepoRoot(targetPath: string, env: Record<string, string>): Promise<string | null> {
+  try {
+    const resolvedPath = normalizeAbsolutePath(targetPath)
+    const repoRoot = await executeCommand(['git', '-C', resolvedPath, 'rev-parse', '--show-toplevel'], { env, silent: true })
+    return normalizeAbsolutePath(repoRoot.trim())
+  } catch {
+    return null
+  }
+}
+
+async function registerExistingLocalRepo(
+  database: Database,
+  gitAuthService: GitAuthService,
+  sourcePath: string,
+  branch?: string,
+  rootPath?: string
+): Promise<{ repo: Repo; existed: boolean }> {
+  const normalizedSourcePath = normalizeAbsolutePath(sourcePath)
+  const env = gitAuthService.getGitEnvironment()
+  const existingBySourcePath = getRepoBySourcePath(database, normalizedSourcePath)
+
+  if (existingBySourcePath) {
+    logger.info(`Local repo already exists in database: ${normalizedSourcePath}`)
+    return { repo: existingBySourcePath, existed: true }
+  }
+
+  const exists = await pathExists(normalizedSourcePath)
+  if (!exists) {
+    throw new Error(`No such file or directory: '${normalizedSourcePath}'`)
+  }
+
+  const isGitRepo = await isValidGitRepo(normalizedSourcePath, env)
+  if (!isGitRepo) {
+    throw new Error(`Directory exists but is not a valid Git repository. Use folder discovery to scan nested repositories.`)
+  }
+
+  if (branch) {
+    const currentBranch = await safeGetCurrentBranch(normalizedSourcePath, env)
+    if (currentBranch !== branch) {
+      await checkoutBranchSafely(normalizedSourcePath, branch, env)
+    }
+  }
+
+  const currentBranch = await safeGetCurrentBranch(normalizedSourcePath, env)
+  const workspaceLocalPath = getWorkspaceLocalPathForRepo(normalizedSourcePath)
+
+  if (workspaceLocalPath) {
+    const existingByLocalPath = getRepoByLocalPath(database, workspaceLocalPath)
+    if (existingByLocalPath) {
+      logger.info(`Workspace repo already exists in database: ${workspaceLocalPath}`)
+      return { repo: existingByLocalPath, existed: true }
+    }
+  }
+
+  const repoLocalPath = workspaceLocalPath || await pickWorkspaceAlias(database, normalizedSourcePath, rootPath)
+  if (!workspaceLocalPath) {
+    await createWorkspaceLink(repoLocalPath, normalizedSourcePath)
+  }
+
+  const repo = createRepo(database, {
+    localPath: repoLocalPath,
+    sourcePath: workspaceLocalPath ? undefined : normalizedSourcePath,
+    branch: branch || currentBranch || undefined,
+    defaultBranch: branch || currentBranch || 'main',
+    cloneStatus: 'ready',
+    clonedAt: Date.now(),
+    isLocal: true,
+    isWorktree: await isGitWorktreeRepo(normalizedSourcePath),
+  })
+
+  logger.info(`Registered local repo at ${normalizedSourcePath} as ${repoLocalPath}`)
+  return { repo, existed: false }
+}
+
+export async function discoverLocalRepos(
+  database: Database,
+  gitAuthService: GitAuthService,
+  rootPath: string,
+  maxDepth: number = DEFAULT_DISCOVERY_MAX_DEPTH
+): Promise<{
+  repos: Repo[]
+  discoveredCount: number
+  existingCount: number
+  errors: Array<{ path: string; error: string }>
+}> {
+  const normalizedRootPath = normalizeAbsolutePath(rootPath)
+  const rootStats = await fs.stat(normalizedRootPath).catch((error: unknown) => {
+    throw new Error(`Failed to access '${normalizedRootPath}': ${getErrorMessage(error)}`)
+  })
+
+  if (!rootStats.isDirectory()) {
+    throw new Error(`Path is not a directory: '${normalizedRootPath}'`)
+  }
+
+  const repoPaths: string[] = []
+  const errors: Array<{ path: string; error: string }> = []
+
+  const walk = async (currentPath: string, depth: number): Promise<void> => {
+    try {
+      if (await isGitRepoRootPath(currentPath)) {
+        repoPaths.push(currentPath)
+        return
+      }
+
+      if (depth >= maxDepth) {
+        return
+      }
+
+      const entries = await fs.readdir(currentPath, { withFileTypes: true })
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.isSymbolicLink() || DISCOVERY_SKIP_DIRECTORIES.has(entry.name)) {
+          continue
+        }
+
+        await walk(path.join(currentPath, entry.name), depth + 1)
+      }
+    } catch (error: unknown) {
+      errors.push({
+        path: currentPath,
+        error: getErrorMessage(error),
+      })
+    }
+  }
+
+  await walk(normalizedRootPath, 0)
+
+  const repos: Repo[] = []
+  let discoveredCount = 0
+  let existingCount = 0
+
+  for (const repoPath of repoPaths.sort((left, right) => left.localeCompare(right))) {
+    try {
+      const result = await registerExistingLocalRepo(database, gitAuthService, repoPath, undefined, normalizedRootPath)
+      repos.push(result.repo)
+      if (result.existed) {
+        existingCount += 1
+      } else {
+        discoveredCount += 1
+      }
+    } catch (error: unknown) {
+      errors.push({
+        path: repoPath,
+        error: getErrorMessage(error),
+      })
+    }
+  }
+
+  return {
+    repos,
+    discoveredCount,
+    existingCount,
+    errors,
+  }
+}
+
+export async function relinkReposFromSessionDirectories(
+  database: Database,
+  gitAuthService: GitAuthService,
+  directories: string[]
+): Promise<{
+  repos: Repo[]
+  relinkedCount: number
+  existingCount: number
+  nonRepoPathCount: number
+  duplicatePathCount: number
+  errors: Array<{ path: string; error: string }>
+}> {
+  const env = gitAuthService.getGitEnvironment()
+  const errors: Array<{ path: string; error: string }> = []
+  const uniqueRepoRoots = new Set<string>()
+  let nonRepoPathCount = 0
+  let duplicatePathCount = 0
+
+  for (const directory of directories) {
+    const normalizedDirectory = normalizeInputPath(directory)
+    if (!normalizedDirectory) {
+      nonRepoPathCount += 1
+      continue
+    }
+
+    const repoRoot = await findGitRepoRoot(normalizedDirectory, env)
+    if (!repoRoot) {
+      nonRepoPathCount += 1
+      continue
+    }
+
+    if (uniqueRepoRoots.has(repoRoot)) {
+      duplicatePathCount += 1
+      continue
+    }
+
+    uniqueRepoRoots.add(repoRoot)
+  }
+
+  const repos: Repo[] = []
+  let relinkedCount = 0
+  let existingCount = 0
+
+  for (const repoRoot of Array.from(uniqueRepoRoots).sort((left, right) => left.localeCompare(right))) {
+    try {
+      const result = await registerExistingLocalRepo(database, gitAuthService, repoRoot)
+      repos.push(result.repo)
+      if (result.existed) {
+        existingCount += 1
+      } else {
+        relinkedCount += 1
+      }
+    } catch (error: unknown) {
+      errors.push({
+        path: repoRoot,
+        error: getErrorMessage(error),
+      })
+    }
+  }
+
+  return {
+    repos,
+    relinkedCount,
+    existingCount,
+    nonRepoPathCount,
+    duplicatePathCount,
+    errors,
+  }
+}
+
+async function checkoutBranchSafely(repoPath: string, branch: string, env: Record<string, string>): Promise<void> {
+  const sanitizedBranch = branch
+    .replace(/^refs\/heads\//, '')
+    .replace(/^refs\/remotes\//, '')
+    .replace(/^origin\//, '')
+
+  let localBranchExists = false
+  try {
+    await executeCommand(['git', '-C', repoPath, 'rev-parse', '--verify', `refs/heads/${sanitizedBranch}`], { env, silent: true })
+    localBranchExists = true
+  } catch {
+    localBranchExists = false
+  }
+
+  let remoteBranchExists = false
+  try {
+    await executeCommand(['git', '-C', repoPath, 'rev-parse', '--verify', `refs/remotes/origin/${sanitizedBranch}`], { env, silent: true })
+    remoteBranchExists = true
+  } catch {
+    remoteBranchExists = false
+  }
+
+  if (localBranchExists) {
+    logger.info(`Checking out existing local branch: ${sanitizedBranch}`)
+    await executeCommand(['git', '-C', repoPath, 'checkout', sanitizedBranch], { env })
+  } else if (remoteBranchExists) {
+    logger.info(`Checking out remote branch: ${sanitizedBranch}`)
+    await executeCommand(['git', '-C', repoPath, 'checkout', '-b', sanitizedBranch, `origin/${sanitizedBranch}`], { env })
+  } else {
+    logger.info(`Creating new branch: ${sanitizedBranch}`)
+    await executeCommand(['git', '-C', repoPath, 'checkout', '-b', sanitizedBranch], { env })
+  }
+}
+
+export async function initLocalRepo(
+  database: Database,
+  gitAuthService: GitAuthService,
+  localPath: string,
+  branch?: string
+): Promise<Repo> {
+  const normalizedInputPath = normalizeInputPath(localPath)
+
+  if (path.isAbsolute(normalizedInputPath)) {
+    const result = await registerExistingLocalRepo(database, gitAuthService, normalizedInputPath, branch)
+    return result.repo
+  }
+
+  const repoLocalPath = normalizedInputPath
+  const targetPath = path.join(getReposPath(), repoLocalPath)
+  const existing = getRepoByLocalPath(database, repoLocalPath)
+  if (existing) {
+    logger.info(`Local repo already exists in database: ${repoLocalPath}`)
+    return existing
+  }
+  
+  const createRepoInput: CreateRepoInput = {
+    localPath: repoLocalPath,
+    branch: branch || undefined,
+    defaultBranch: branch || 'main',
+    cloneStatus: 'cloning',
+    clonedAt: Date.now(),
+    isLocal: true,
+  }
+  
+  let repo: Repo
+  let directoryCreated = false
+  
+  try {
+    repo = createRepo(database, createRepoInput)
+    logger.info(`Created database record for local repo: ${repoLocalPath} (id: ${repo.id})`)
+  } catch (error: unknown) {
+    logger.error(`Failed to create database record for local repo: ${repoLocalPath}`, error)
+    throw new Error(`Failed to register local repository '${repoLocalPath}': ${getErrorMessage(error)}`)
+  }
+  
+  try {
+    await ensureDirectoryExists(targetPath)
+    directoryCreated = true
+    logger.info(`Created directory for local repo: ${targetPath}`)
+
+    logger.info(`Initializing git repository: ${targetPath}`)
+    await executeCommand(['git', 'init'], { cwd: targetPath })
+
+    if (branch && branch !== 'main') {
+      await executeCommand(['git', '-C', targetPath, 'checkout', '-b', branch])
+    }
+    
+    const isGitRepo = await executeCommand(['git', '-C', targetPath, 'rev-parse', '--git-dir'])
+      .then(() => true)
+      .catch(() => false)
+    
+    if (!isGitRepo) {
+      throw new Error(`Git initialization failed - directory exists but is not a valid git repository`)
+    }
+    
+    updateRepoStatus(database, repo.id, 'ready')
+    logger.info(`Local git repo ready: ${repoLocalPath}`)
+    return { ...repo, cloneStatus: 'ready' }
+  } catch (error: unknown) {
+    logger.error(`Failed to initialize local repo, rolling back: ${repoLocalPath}`, error)
+    
+    try {
+      deleteRepo(database, repo.id)
+      logger.info(`Rolled back database record for repo id: ${repo.id}`)
+    } catch (dbError: unknown) {
+      logger.error(`Failed to rollback database record for repo id ${repo.id}:`, getErrorMessage(dbError))
+    }
+    
+    if (directoryCreated) {
+      try {
+        await executeCommand(['rm', '-rf', repoLocalPath], getReposPath())
+        logger.info(`Rolled back directory: ${repoLocalPath}`)
+      } catch (fsError: unknown) {
+        logger.error(`Failed to rollback directory ${repoLocalPath}:`, getErrorMessage(fsError))
+      }
+    }
+    
+    throw new Error(`Failed to initialize local repository '${repoLocalPath}': ${getErrorMessage(error)}`)
+  }
+}
+
+export interface CloneRepoOptions {
+  branch?: string
+  directoryName?: string
+  useWorktree?: boolean
+  skipSSHVerification?: boolean
+  baseBranch?: string
+}
+
+export async function cloneRepo(
+  database: Database,
+  gitAuthService: GitAuthService,
+  repoUrl: string,
+  options: CloneRepoOptions = {}
+): Promise<Repo> {
+  const { branch, directoryName, useWorktree = false, skipSSHVerification = false, baseBranch } = options
+  const effectiveUrl = normalizeSSHUrl(repoUrl)
+  const isSSH = isSSHUrl(effectiveUrl)
+  const preserveSSH = isSSH
+  const { url: normalizedRepoUrl, name: repoName } = normalizeRepoUrl(effectiveUrl, preserveSSH)
+  const dirName = directoryName === undefined
+    ? sanitizeRepoDirectoryName(repoName)
+    : normalizeRepoDirectoryName(directoryName)
+  const baseRepoDirName = dirName
+  const worktreeDirName = branch && useWorktree ? `${dirName}-${sanitizeBranchForDirectory(branch)}` : dirName
+  const localPath = worktreeDirName
+
+  const existing = getRepoByUrlAndBranch(database, normalizedRepoUrl, branch)
+
+  if (existing) {
+    logger.info(`Repo branch already exists: ${normalizedRepoUrl}${branch ? `#${branch}` : ''}`)
+    return existing
+  }
+
+  await ensureDirectoryExists(getReposPath())
+  const baseRepoExists = existsSync(path.join(path.resolve(getReposPath()), baseRepoDirName))
+
+  const shouldUseWorktree = useWorktree && branch && baseRepoExists
+
+  const createRepoInput: CreateRepoInput = {
+    repoUrl: normalizedRepoUrl,
+    localPath,
+    branch: branch || undefined,
+    defaultBranch: branch || 'main',
+    cloneStatus: 'cloning',
+    clonedAt: Date.now(),
+  }
+  
+  if (shouldUseWorktree) {
+    createRepoInput.isWorktree = true
+  }
+  
+  const repo = createRepo(database, createRepoInput)
+
+  try {
+    await gitAuthService.setupSSHForRepoUrl(effectiveUrl, database, skipSSHVerification)
+
+    const env = {
+      ...gitAuthService.getGitEnvironment(),
+      ...(isSSH ? gitAuthService.getSSHEnvironment() : {})
+    }
+
+    if (shouldUseWorktree) {
+      logger.info(`Creating worktree for branch: ${branch}`)
+      
+      const baseRepoPath = path.resolve(getReposPath(), baseRepoDirName)
+      const worktreePath = path.resolve(getReposPath(), worktreeDirName)
+      
+       await executeCommand(['git', '-C', baseRepoPath, 'fetch', '--all'], { cwd: getReposPath(), env })
+
+      
+       await createWorktreeSafely(baseRepoPath, worktreePath, branch, env, baseBranch)
+      
+      const worktreeVerified = existsSync(worktreePath)
+      
+      if (!worktreeVerified) {
+        throw new Error(`Worktree directory was not created at: ${worktreePath}`)
+      }
+      
+      logger.info(`Worktree verified at: ${worktreePath}`)
+      
+    } else if (branch && baseRepoExists && useWorktree) {
+      logger.info(`Base repo exists but worktree creation failed, cloning branch separately`)
+      
+      const worktreeExists = existsSync(path.join(path.resolve(getReposPath()), worktreeDirName))
+      if (worktreeExists) {
+        logger.info(`Workspace directory exists, removing it: ${worktreeDirName}`)
+        try {
+          rmSync(path.join(path.resolve(getReposPath()), worktreeDirName), { recursive: true, force: true })
+          const verifyRemoved = !existsSync(path.join(path.resolve(getReposPath()), worktreeDirName))
+          if (!verifyRemoved) {
+            throw new Error(`Failed to remove existing directory: ${worktreeDirName}`)
+          }
+        } catch (cleanupError: unknown) {
+          logger.error(`Failed to clean up existing directory: ${worktreeDirName}`, cleanupError)
+          throw new Error(`Cannot clone: directory ${worktreeDirName} exists and could not be removed`)
+        }
+      }
+      
+      try {
+        await executeCommand(['git', 'clone', '-b', branch, normalizedRepoUrl, worktreeDirName], { cwd: getReposPath(), env, timeout: GIT_CLONE_TIMEOUT })
+      } catch (error: unknown) {
+        if (getErrorMessage(error).includes('destination path') && getErrorMessage(error).includes('already exists')) {
+          logger.error(`Clone failed: directory still exists after cleanup attempt`)
+          throw new Error(`Workspace directory ${worktreeDirName} already exists. Please delete it manually or contact support.`)
+        }
+        
+        if (branch && (getErrorMessage(error).includes('Remote branch') || getErrorMessage(error).includes('not found'))) {
+          logger.info(`Branch '${branch}' not found, cloning default branch and creating branch locally`)
+          try {
+            await executeCommand(['git', 'clone', normalizedRepoUrl, worktreeDirName], { cwd: getReposPath(), env, timeout: GIT_CLONE_TIMEOUT })
+          } catch (cloneError: unknown) {
+            throw enhanceCloneError(cloneError, normalizedRepoUrl, getErrorMessage(cloneError))
+          }
+          
+          let localBranchExists = 'missing'
+          try {
+            await executeCommand(['git', '-C', path.resolve(getReposPath(), worktreeDirName), 'rev-parse', '--verify', `refs/heads/${branch}`])
+            localBranchExists = 'exists'
+          } catch {
+            localBranchExists = 'missing'
+          }
+          
+          if (localBranchExists.trim() === 'missing') {
+            await executeCommand(['git', '-C', path.resolve(getReposPath(), worktreeDirName), 'checkout', '-b', branch])
+          } else {
+            await executeCommand(['git', '-C', path.resolve(getReposPath(), worktreeDirName), 'checkout', branch])
+          }
+        } else {
+          throw enhanceCloneError(error, normalizedRepoUrl, getErrorMessage(error))
+        }
+      }
+    } else {
+      if (baseRepoExists) {
+        logger.info(`Repository directory already exists, verifying it's a valid git repo: ${baseRepoDirName}`)
+        const isValidRepo = await executeCommand(['git', '-C', path.resolve(getReposPath(), baseRepoDirName), 'rev-parse', '--git-dir'], path.resolve(getReposPath())).then(() => 'valid').catch(() => 'invalid')
+        
+        if (isValidRepo.trim() === 'valid') {
+          const existingOriginUrl = await executeCommand(
+            ['git', '-C', path.resolve(getReposPath(), baseRepoDirName), 'remote', 'get-url', 'origin'],
+            { cwd: path.resolve(getReposPath()), silent: true }
+          ).then((output) => output.trim()).catch(() => '')
+
+          if (existingOriginUrl && normalizeRepoUrlForCompare(existingOriginUrl) !== normalizeRepoUrlForCompare(normalizedRepoUrl)) {
+            const collisionError = new Error(`Directory '${baseRepoDirName}' already contains a different repository (${existingOriginUrl}). Choose a different directory name.`) as Error & { statusCode: number }
+            collisionError.statusCode = 409
+            throw collisionError
+          }
+
+          logger.info(`Valid repository found: ${normalizedRepoUrl}`)
+          
+          if (branch) {
+            logger.info(`Switching to branch: ${branch}`)
+             await executeCommand(['git', '-C', path.resolve(getReposPath(), baseRepoDirName), 'fetch', '--all'], { cwd: getReposPath(), env })
+
+            
+            let remoteBranchExists = false
+            try {
+              await executeCommand(['git', '-C', path.resolve(getReposPath(), baseRepoDirName), 'rev-parse', '--verify', `refs/remotes/origin/${branch}`])
+              remoteBranchExists = true
+            } catch {
+              remoteBranchExists = false
+            }
+            
+            let localBranchExists = false
+            try {
+              await executeCommand(['git', '-C', path.resolve(getReposPath(), baseRepoDirName), 'rev-parse', '--verify', `refs/heads/${branch}`])
+              localBranchExists = true
+            } catch {
+              localBranchExists = false
+            }
+            
+            if (localBranchExists) {
+              logger.info(`Checking out existing local branch: ${branch}`)
+              await executeCommand(['git', '-C', path.resolve(getReposPath(), baseRepoDirName), 'checkout', branch])
+            } else if (remoteBranchExists) {
+              logger.info(`Checking out remote branch: ${branch}`)
+              await executeCommand(['git', '-C', path.resolve(getReposPath(), baseRepoDirName), 'checkout', '-b', branch, `origin/${branch}`])
+            } else {
+              logger.info(`Creating new branch: ${branch}`)
+              await executeCommand(['git', '-C', path.resolve(getReposPath(), baseRepoDirName), 'checkout', '-b', branch])
+            }
+          }
+          
+          updateRepoStatus(database, repo.id, 'ready')
+          return { ...repo, cloneStatus: 'ready' }
+        } else {
+          logger.warn(`Invalid repository directory found, removing and recloning: ${baseRepoDirName}`)
+          rmSync(path.join(getReposPath(), baseRepoDirName), { recursive: true, force: true })
+        }
+      }
+      
+      logger.info(`Cloning repo: ${normalizedRepoUrl}${branch ? ` to branch ${branch}` : ''}`)
+      
+      const worktreeExists = existsSync(path.join(getReposPath(), worktreeDirName))
+      if (worktreeExists) {
+        logger.info(`Workspace directory exists, removing it: ${worktreeDirName}`)
+        try {
+          rmSync(path.join(getReposPath(), worktreeDirName), { recursive: true, force: true })
+          const verifyRemoved = !existsSync(path.join(getReposPath(), worktreeDirName))
+          if (!verifyRemoved) {
+            throw new Error(`Failed to remove existing directory: ${worktreeDirName}`)
+          }
+        } catch (cleanupError: unknown) {
+          logger.error(`Failed to clean up existing directory: ${worktreeDirName}`, cleanupError)
+          throw new Error(`Cannot clone: directory ${worktreeDirName} exists and could not be removed`)
+        }
+      }
+    
+      try {
+        const cloneCmd = branch
+          ? ['git', 'clone', '-b', branch, normalizedRepoUrl, worktreeDirName]
+          : ['git', 'clone', normalizedRepoUrl, worktreeDirName]
+        
+        await executeCommand(cloneCmd, { cwd: getReposPath(), env, timeout: GIT_CLONE_TIMEOUT })
+      } catch (error: unknown) {
+        if (getErrorMessage(error).includes('destination path') && getErrorMessage(error).includes('already exists')) {
+          logger.error(`Clone failed: directory still exists after cleanup attempt`)
+          throw new Error(`Workspace directory ${worktreeDirName} already exists. Please delete it manually or contact support.`)
+        }
+        
+        if (branch && (getErrorMessage(error).includes('Remote branch') || getErrorMessage(error).includes('not found'))) {
+          logger.info(`Branch '${branch}' not found, cloning default branch and creating branch locally`)
+          try {
+            await executeCommand(['git', 'clone', normalizedRepoUrl, worktreeDirName], { cwd: getReposPath(), env, timeout: GIT_CLONE_TIMEOUT })
+          } catch (cloneError: unknown) {
+            throw enhanceCloneError(cloneError, normalizedRepoUrl, getErrorMessage(cloneError))
+          }
+          
+          let localBranchExists = 'missing'
+          try {
+            await executeCommand(['git', '-C', path.resolve(getReposPath(), worktreeDirName), 'rev-parse', '--verify', `refs/heads/${branch}`])
+            localBranchExists = 'exists'
+          } catch {
+            localBranchExists = 'missing'
+          }
+          
+          if (localBranchExists.trim() === 'missing') {
+            await executeCommand(['git', '-C', path.resolve(getReposPath(), worktreeDirName), 'checkout', '-b', branch])
+          } else {
+            await executeCommand(['git', '-C', path.resolve(getReposPath(), worktreeDirName), 'checkout', branch])
+          }
+        } else {
+          throw enhanceCloneError(error, normalizedRepoUrl, getErrorMessage(error))
+        }
+      }
+    }
+    
+    updateRepoStatus(database, repo.id, 'ready')
+    logger.info(`Repo ready: ${normalizedRepoUrl}${branch ? `#${branch}` : ''}${shouldUseWorktree ? ' (worktree)' : ''}`)
+    return { ...repo, cloneStatus: 'ready' }
+  } catch (error: unknown) {
+    logger.error(`Failed to create repo: ${normalizedRepoUrl}${branch ? `#${branch}` : ''}`, error)
+    deleteRepo(database, repo.id)
+    throw error
+  } finally {
+    await gitAuthService.cleanupSSHKey()
+  }
+}
+
+export async function getCurrentBranch(repo: Repo, env: Record<string, string>): Promise<string | null> {
+  const repoPath = path.resolve(repo.fullPath)
+  const branch = await safeGetCurrentBranch(repoPath, env)
+  return branch || repo.branch || repo.defaultBranch || null
+}
+
+export async function switchBranch(
+  database: Database,
+  gitAuthService: GitAuthService,
+  repoId: number,
+  branch: string
+): Promise<void> {
+  const repo = getRepoById(database, repoId)
+  if (!repo) {
+    throw new Error(`Repo not found: ${repoId}`)
+  }
+  
+  try {
+    const repoPath = path.resolve(repo.fullPath)
+    const env = gitAuthService.getGitEnvironment()
+
+    const sanitizedBranch = branch
+      .replace(/^refs\/heads\//, '')
+      .replace(/^refs\/remotes\//, '')
+      .replace(/^origin\//, '')
+
+    logger.info(`Switching to branch: ${sanitizedBranch} in ${repo.localPath}`)
+
+    await executeCommand(['git', '-C', repoPath, 'fetch', '--all'], { env })
+    
+    await checkoutBranchSafely(repoPath, sanitizedBranch, env)
+    
+    logger.info(`Successfully switched to branch: ${sanitizedBranch}`)
+
+    updateRepoBranch(database, repoId, sanitizedBranch)
+  } catch (error: unknown) {
+    logger.error(`Failed to switch branch for repo ${repoId}:`, error)
+    throw error
+  }
+}
+
+export async function createBranch(database: Database, gitAuthService: GitAuthService, repoId: number, branch: string): Promise<void> {
+  const repo = getRepoById(database, repoId)
+  if (!repo) {
+    throw new Error(`Repo not found: ${repoId}`)
+  }
+  
+  try {
+    const repoPath = path.resolve(repo.fullPath)
+    const env = gitAuthService.getGitEnvironment()
+    
+    const sanitizedBranch = branch
+      .replace(/^refs\/heads\//, '')
+      .replace(/^refs\/remotes\//, '')
+      .replace(/^origin\//, '')
+
+    logger.info(`Creating new branch: ${sanitizedBranch} in ${repo.localPath}`)
+    await executeCommand(['git', '-C', repoPath, 'checkout', '-b', sanitizedBranch], { env })
+    logger.info(`Successfully created and switched to branch: ${sanitizedBranch}`)
+
+    updateRepoBranch(database, repoId, sanitizedBranch)
+  } catch (error: unknown) {
+    logger.error(`Failed to create branch for repo ${repoId}:`, error)
+    throw error
+  }
+}
+
+export async function pullRepo(
+  database: Database,
+  gitAuthService: GitAuthService,
+  repoId: number
+): Promise<void> {
+  const repo = getRepoById(database, repoId)
+  if (!repo) {
+    throw new Error(`Repo not found: ${repoId}`)
+  }
+  
+  if (repo.isLocal) {
+    logger.info(`Skipping pull for local repo: ${repo.localPath}`)
+    return
+  }
+  
+  try {
+    const env = gitAuthService.getGitEnvironment()
+
+    logger.info(`Pulling repo: ${repo.repoUrl}`)
+    await executeCommand(['git', '-C', path.resolve(repo.fullPath), 'pull'], { env })
+    
+    updateLastPulled(database, repoId)
+    logger.info(`Repo pulled successfully: ${repo.repoUrl}`)
+  } catch (error: unknown) {
+    logger.error(`Failed to pull repo: ${repo.repoUrl}`, error)
+    throw error
+  }
+}
+
+export async function deleteRepoFiles(database: Database, repoId: number): Promise<void> {
+  const repo = getRepoById(database, repoId)
+  if (!repo) {
+    throw new Error(`Repo not found: ${repoId}`)
+  }
+
+  const fullPath = path.resolve(getReposPath(), repo.localPath)
+
+  if (repo.isWorktree && repo.repoUrl) {
+    const { name: repoName } = normalizeRepoUrl(repo.repoUrl)
+    const baseRepoPath = path.resolve(getReposPath(), repoName)
+
+    await removeWorktree(baseRepoPath, fullPath)
+  }
+
+  await executeCommand(['rm', '-rf', repo.localPath], getReposPath())
+  deleteRepo(database, repoId)
+}
+
+function normalizeRepoUrl(url: string, preserveSSH: boolean = false): { url: string; name: string } {
+  const sshMatch = url.match(/^git@([^:]+):(.+?)(?:\.git)?$/)
+  if (sshMatch) {
+    const [, host, pathPart] = sshMatch
+    const path = pathPart ?? ''
+    const repoName = path.split('/').pop() || `repo-${Date.now()}`
+    return {
+      url: preserveSSH ? url : `https://${host}/${path.replace(/\.git$/, '')}`,
+      name: repoName
+    }
+  }
+
+  if (url.startsWith('ssh://')) {
+    const { host } = parseSSHHost(url)
+    const pathParts = url.split(`${host}/`)
+    const pathPart = pathParts[1] || ''
+    const repoName = pathPart.replace(/\.git$/, '').split('/').pop() || `repo-${Date.now()}`
+    
+    return {
+      url: preserveSSH ? url : `https://${host}/${pathPart.replace(/\.git$/, '')}`,
+      name: repoName
+    }
+  }
+
+  const shorthandMatch = url.match(/^([^/]+)\/([^/]+)$/)
+  if (shorthandMatch) {
+    const [, owner, repoName] = shorthandMatch
+    return {
+      url: `https://github.com/${owner}/${repoName}`,
+      name: repoName ?? `repo-${Date.now()}`
+    }
+  }
+
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    const httpsUrl = url.replace(/^http:/, 'https:').replace(/\.git$/, '')
+    const match = httpsUrl.match(/([^/]+)$/)
+    return {
+      url: httpsUrl,
+      name: match?.[1] || `repo-${Date.now()}`
+    }
+  }
+
+  return {
+    url,
+    name: `repo-${Date.now()}`
+  }
+}
+
+export async function resolveDefaultBranch(repoPath: string, env: Record<string, string>): Promise<string> {
+  return executeCommand(['git', '-C', repoPath, 'rev-parse', '--abbrev-ref', 'origin/HEAD'], { env, silent: true })
+    .then((ref) => ref.trim().replace('origin/', ''))
+    .catch(() => 'main')
+}
+
+export async function removeWorktree(baseRepoPath: string, worktreePath: string, env?: Record<string, string>): Promise<void> {
+  try {
+    await executeCommand(['git', '-C', baseRepoPath, 'worktree', 'remove', '--force', worktreePath], env ? { env } : undefined)
+  } catch {
+    // fall through to prune + rm
+  } finally {
+    await executeCommand(['git', '-C', baseRepoPath, 'worktree', 'prune'], env ? { env } : undefined).catch(() => {})
+  }
+  await executeCommand(['rm', '-rf', worktreePath]).catch(() => {})
+}
+
+export async function createWorktreeSafely(baseRepoPath: string, worktreePath: string, branch: string, env: Record<string, string>, baseBranch?: string): Promise<void> {
+  const currentBranch = await safeGetCurrentBranch(baseRepoPath, env)
+  if (currentBranch === branch) {
+    const defaultBranch = await resolveDefaultBranch(baseRepoPath, env)
+
+    await executeCommand(['git', '-C', baseRepoPath, 'checkout', defaultBranch], { env })
+      .catch(() => executeCommand(['git', '-C', baseRepoPath, 'checkout', 'main'], { env }))
+  }
+
+  await executeCommand(['git', '-C', baseRepoPath, 'worktree', 'prune'], { env }).catch(() => {})
+
+  let branchExists = false
+  try {
+    await executeCommand(['git', '-C', baseRepoPath, 'rev-parse', '--verify', `refs/heads/${branch}`], { env, silent: true })
+    branchExists = true
+  } catch {
+    try {
+      await executeCommand(['git', '-C', baseRepoPath, 'rev-parse', '--verify', `refs/remotes/origin/${branch}`], { env, silent: true })
+      branchExists = true
+    } catch {
+      branchExists = false
+    }
+  }
+
+  if (branchExists) {
+    await executeCommand(['git', '-C', baseRepoPath, 'worktree', 'add', worktreePath, branch], { env })
+  } else {
+    const addArgs = ['git', '-C', baseRepoPath, 'worktree', 'add', '-b', branch, worktreePath]
+    if (baseBranch) {
+      addArgs.push(baseBranch)
+    }
+    await executeCommand(addArgs, { env })
+  }
+}
+
+export function ensureMirrorTargetPath(name: string): { fullPath: string; localPath: string } {
+  const slugified = name
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '')
+    || 'repo'
+
+  const reposRoot = getReposPath()
+
+  let candidate = slugified
+  let suffix = 2
+  while (existsSync(path.join(reposRoot, candidate))) {
+    candidate = `${slugified}-${suffix}`
+    suffix += 1
+  }
+
+  return {
+    fullPath: path.join(reposRoot, candidate),
+    localPath: candidate,
+  }
+}
+
+export function createRepoRow(
+  database: Database,
+  params: { name: string; originUrl?: string; localPath: string; fullPath: string; branch?: string }
+): { repo: Repo; created: boolean } {
+  const { originUrl, localPath, branch } = params
+
+  const existing = originUrl
+    ? getRepoByUrlAndBranch(database, originUrl, branch)
+    : getRepoByLocalPath(database, localPath)
+
+  if (existing) {
+    return { repo: existing, created: false }
+  }
+
+  const repo = createRepo(database, {
+    repoUrl: originUrl,
+    localPath,
+    branch,
+    defaultBranch: branch || 'main',
+    cloneStatus: 'ready',
+    clonedAt: Date.now(),
+    isLocal: !originUrl,
+  } as CreateRepoInput)
+
+  return { repo, created: true }
+}
+
+export function isRepoInUse(db: Database, repoId: number): boolean {
+  const repo = getRepoById(db, repoId)
+  if (!repo) {
+    return false
+  }
+
+  return sseAggregator.getActiveDirectories().includes(repo.fullPath)
+}
+
+export async function getSiblingRepos(
+  database: Database,
+  repoId: number,
+  gitEnv: Record<string, string>,
+  openCodeClient?: OpenCodeClient,
+): Promise<Array<Repo & { currentBranch: string | undefined }>> {
+  const settingsService = new SettingsService(database)
+  const settings = settingsService.getSettings()
+  const allRepos = listRepos(database, settings.preferences.repoOrder)
+
+  const target = allRepos.find((r) => r.id === repoId)
+  if (!target || target.cloneStatus !== 'ready') return []
+
+  const targetProjectId = await resolveProjectId(target.fullPath)
+  if (!targetProjectId) return []
+
+  const ready = allRepos.filter((r) => r.cloneStatus === 'ready')
+  const withProjectIds = await Promise.all(
+    ready.map(async (repo) => ({
+      repo,
+      projectId: await resolveProjectId(repo.fullPath).catch(() => null),
+    })),
+  )
+
+  const matching = withProjectIds
+    .filter((entry) => entry.projectId === targetProjectId)
+    .map((entry) => entry.repo)
+
+  const repoSiblings = await Promise.all(
+    matching.map(async (repo) => ({
+      ...repo,
+      currentBranch: (await getCurrentBranch(repo, gitEnv)) ?? undefined,
+    })),
+  )
+
+  if (!openCodeClient) return repoSiblings
+
+  try {
+    const workspaces = await openCodeClient.getJson<Array<{
+      id: string
+      type: string
+      name: string | null
+      branch: string | null
+      directory: string | null
+      projectID: string
+    }>>('/experimental/workspace', { directory: target.fullPath })
+
+    // Normalize paths so a workspace pointing at a real repo directory can never
+    // be exposed as deletable. Deleting an OpenCode workspace recursively removes
+    // its directory, so the current repo directory and all known managed repo
+    // directories must be excluded regardless of trailing slashes or symlinks.
+    // Workspaces that are git main checkouts (not linked worktrees) are also
+    // excluded so the project's origin/main repository can never be surfaced
+    // as deletable.
+    const knownDirectories = new Set(repoSiblings.map((repo) => canonical(repo.fullPath)))
+    const targetDirectory = canonical(target.fullPath)
+    const reposRoot = canonical(getReposPath())
+    const scheduleWorktreeRoot = canonical(getScheduleWorktreesPath())
+
+    // Schedule runs may create their isolated worktree via the OpenCode workspace
+    // API, which places it outside getScheduleWorktreesPath(). Exclude any live
+    // run's workspace/worktree so an in-progress run is never surfaced as a
+    // deletable Sibling during the window it exists.
+    const activeRuns = listActiveScheduleRunWorkspaces(database)
+    const activeRunWorkspaceIds = new Set(activeRuns.map((run) => run.workspaceId).filter((id): id is string => id !== null))
+    const activeRunDirectories = new Set(
+      activeRuns.map((run) => run.worktreePath).filter((p): p is string => p !== null).map((p) => canonical(p)),
+    )
+
+    const candidates = workspaces.filter((workspace) => {
+      if (workspace.projectID !== targetProjectId) return false
+      if (!workspace.directory) return false
+
+      const workspaceDirectory = canonical(workspace.directory)
+      if (workspaceDirectory === targetDirectory) return false
+      if (workspaceDirectory === reposRoot) return false
+      if (workspaceDirectory.startsWith(`${scheduleWorktreeRoot}${path.sep}`)) return false
+      if (activeRunWorkspaceIds.has(workspace.id)) return false
+      if (activeRunDirectories.has(workspaceDirectory)) return false
+      if (knownDirectories.has(workspaceDirectory)) return false
+
+      return true
+    })
+
+    const mainChecks = await Promise.all(
+      candidates.map((workspace) => isGitMainCheckout(workspace.directory!).catch(() => false)),
+    )
+
+    const uniqueWorkspaces = new Map<string, typeof candidates[number]>()
+    candidates
+      .filter((_, index) => !mainChecks[index])
+      .forEach((workspace) => {
+        const directory = canonical(workspace.directory!)
+        if (!uniqueWorkspaces.has(directory)) {
+          uniqueWorkspaces.set(directory, workspace)
+        }
+      })
+
+    const workspaceSiblings = Array.from(uniqueWorkspaces.values())
+      .map((workspace) => ({
+        id: -1,
+        repoUrl: target.repoUrl,
+        localPath: workspace.name ?? workspace.id,
+        fullPath: workspace.directory!,
+        sourcePath: workspace.directory!,
+        branch: workspace.branch ?? undefined,
+        defaultBranch: target.defaultBranch,
+        cloneStatus: 'ready' as const,
+        clonedAt: Date.now(),
+        isWorktree: true,
+        isLocal: true,
+        currentBranch: workspace.branch ?? undefined,
+        workspaceId: workspace.id,
+        workspaceType: workspace.type,
+        workspaceName: workspace.name ?? undefined,
+      }))
+
+    return [...repoSiblings, ...workspaceSiblings]
+  } catch (error) {
+    logger.warn('Failed to list OpenCode workspaces:', error)
+    return repoSiblings
+  }
+}
