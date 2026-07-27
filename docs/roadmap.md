@@ -1,15 +1,16 @@
 # Roadmap
 
-## Phase 1: Core Multi-Agent Platform (Complete)
+## Phase 1: Core Multi-Agent Platform ✅
 
-- [x] Backend agent adapter pattern (types, registry, OpenCode/OpenClaude/NIM adapters)
+- [x] Backend agent adapter pattern (types, registry, OpenCode/OpenClaude/PI adapters)
 - [x] Frontend Agents page with Overview + Sessions tabs
 - [x] NVIDIA NIM integration as provider (not agent CLI)
-- [x] Provider Management UI with full CRUD
+- [x] Provider Management UI with full CRUD (add/edit/delete/API keys)
 - [x] Providers page reading from file + DB + OpenCode server
 - [x] PI (pi_agent_rust) agent adapter with RPC mode
 - [x] New Session creation per agent card
 - [x] Navigation cleanup (NIM removed from nav, kept as provider only)
+- [x] Client/Server folder structure
 
 ## Phase 2: Server/Client Split
 

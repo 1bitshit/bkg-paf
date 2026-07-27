@@ -19,16 +19,20 @@
 - Wire session creation to navigate to new session
 - Remove NIM from navigation drawer
 
-### Code Quality
-- Fix lint errors (unused Triangle import, unused stdout variable)
-- All lint passes clean (0 errors)
-
-## In Progress
+### Project Structure
+- Create `client/` folder with README
+- Create `server/` folder with README
 
 ### Documentation
-- Create docs/roadmap.md
-- Create docs/tasks.md
-- Create docs/plan.md
+- Rebrand README.md with bkg-paf name and multi-agent features
+- Rebrand docs/index.md with new name
+- Update docs/features/overview.md with agent system and provider management
+- Update docs/plan.md with full architecture
+- Update docs/roadmap.md with phase tracking
+
+### Code Quality
+- Fix lint errors (unused imports, variables)
+- All lint passes clean (0 errors)
 
 ## Pending
 

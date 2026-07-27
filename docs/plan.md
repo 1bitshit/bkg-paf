@@ -4,14 +4,12 @@
 
 ```
 ┌──────────────────────────────────────────────────┐
-│                   Frontend (React)                │
-│  Agents page → Sessions → Messages               │
-│  Providers page → CRUD → API keys                │
-│  Monitor page → Health → Usage                   │
+│              Client (React + Vite)               │
+│  Agents · Providers · Sessions · Monitor         │
 └──────────────────┬───────────────────────────────┘
                    │ REST API (port 5003)
 ┌──────────────────▼───────────────────────────────┐
-│                  Backend (Bun + Hono)             │
+│              Server (Bun + Hono)                 │
 │  Agent Registry → Adapter Pattern                │
 │  ├── OpenCodeAdapter (OpenCode server :5551)     │
 │  ├── OpenClaudeAdapter (CLI process)             │
@@ -42,9 +40,9 @@ Registry manages all adapters. Frontend queries `/api/agents` for list + health.
 ## Provider Management
 
 Providers are merged from three sources:
-1. **Config file** (opencode.json on disk)
-2. **Database** (opencode_configs table via SettingsService)
-3. **OpenCode server** (live `/provider` endpoint)
+1. **Config file** — `opencode.json` on disk
+2. **Database** — `opencode_configs` table via SettingsService
+3. **OpenCode server** — Live `/provider` endpoint
 
 Write operations go to the config file, then sync to DB and restart OpenCode.
 
@@ -55,11 +53,33 @@ PI (pi_agent_rust) uses RPC mode:
 - JSON commands over stdin: `{ "command": "prompt", "content": "..." }`
 - Streaming events over stdout
 - Supports all 8 built-in tools (read, write, edit, bash, grep, find, ls, hashline_edit)
-- Requires ANTHROPIC_API_KEY or OPENAI_API_KEY
+- Requires `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`
+
+## Project Structure
+
+```
+bkg-paf/
+├── client/               # Frontend overview
+├── server/               # Backend overview
+├── backend/              # Backend source (Bun + Hono)
+│   └── src/
+│       ├── agents/       # Agent adapters (OpenCode, OpenClaude, PI)
+│       ├── routes/       # API routes (agents, providers, settings)
+│       ├── services/     # Business logic (auth, settings, scheduling)
+│       └── index.ts      # Entry point
+├── frontend/             # Frontend source (React + Vite)
+│   └── src/
+│       ├── pages/        # Agents, Providers, Monitor, etc.
+│       ├── api/          # API client functions
+│       ├── hooks/        # React Query hooks
+│       └── components/   # UI components
+├── shared/               # Shared types, schemas, config
+└── docs/                 # Documentation
+```
 
 ## Next Steps
 
-1. Server/client repo split
-2. bkg-p2p integration for CLAW token economy
-3. opencode-voice integration
-4. Production monitoring and audit logging
+1. Server/client repo split — `bkg-code-manager-server` (private) + `bkg-code-manager-client` (public)
+2. bkg-p2p integration — CLAW token earning via P2P network
+3. opencode-voice — Voice-driven coding sessions
+4. Production hardening — Monitoring, audit logging, credential rotation
